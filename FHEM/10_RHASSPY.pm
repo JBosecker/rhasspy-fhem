@@ -1,8 +1,9 @@
 ##############################################
 #
-# FHEM snips.ai modul  http://snips.ai)
+# FHEM Rhasspy module  https://github.com/rhasspy/rhasspy)
 #
 # written 2018 by Tobias Wiedenmann (Thyraz)
+# forked and adopted for Rhasspy 2020 by Johannes Bosecker (JBosecker)
 # thanks to Matthias Kleine
 #
 ##############################################
@@ -27,33 +28,31 @@ my %sets = (
 # MQTT Topics die das Modul automatisch abonniert
 my @topics = qw(
     hermes/intent/+
-    hermes/nlu/intentParsed
-    hermes/hotword/+/detected
+    hermes/hotword/toggleOff
     hermes/hotword/toggleOn
 );
 
 
-sub SNIPS_Initialize($) {
+sub RHASSPY_Initialize($) {
     my $hash = shift @_;
 
-    # Attribute snipsName und snipsRoom für andere Devices zur Verfügung abbestellen
-    addToAttrList("snipsName");
-    addToAttrList("snipsRoom");
-    addToAttrList("snipsMapping:textField-long");
+    # Attribute rhasspyName und rhasspyRoom für andere Devices zur Verfügung stellen
+    addToAttrList("rhasspyName");
+    addToAttrList("rhasspyRoom");
+    addToAttrList("rhasspyMapping:textField-long");
 
     # Consumer
-    $hash->{DefFn} = "SNIPS::Define";
-    $hash->{UndefFn} = "SNIPS::Undefine";
-    $hash->{SetFn} = "SNIPS::Set";
-    $hash->{AttrFn} = "SNIPS::Attr";
-    $hash->{AttrList} = "IODev defaultRoom snipsIntents:textField-long shortcuts:textField-long response:textField-long " . $main::readingFnAttributes;
-    $hash->{OnMessageFn} = "SNIPS::onmessage";
-
-    main::LoadModule("MQTT");
+    $hash->{DefFn} = "RHASSPY::Define";
+    $hash->{UndefFn} = "RHASSPY::Undefine";
+    $hash->{SetFn} = "RHASSPY::Set";
+    $hash->{AttrFn} = "RHASSPY::Attr";
+    $hash->{AttrList} = "defaultRoom rhasspyIntents:textField-long shortcuts:textField-long response:textField-long " . $main::readingFnAttributes;
+    $hash->{ReadFn}   = "RHASSPY::ioDevRead";
+    $hash->{ReadyFn}  = "RHASSPY::ioDevReady";
 }
 
 # Cmd in main:: ausführen damit User den Prefix nicht vor alle Perl-Aufrufe schreiben muss
-sub SNIPS_execute($$$$$) {
+sub RHASSPY_execute($$$$$) {
     my ($hash, $device, $cmd, $value, $siteId) = @_;
     my $returnVal;
 
@@ -70,7 +69,7 @@ sub SNIPS_execute($$$$$) {
 }
 
 
-package SNIPS;
+package RHASSPY;
 
 use strict;
 use warnings;
@@ -79,11 +78,17 @@ use GPUtils qw(:all);
 use JSON;
 use Net::MQTT::Constants;
 use Encode;
+use Time::HiRes qw(gettimeofday);
+use JSON qw(decode_json encode_json);
+use MIME::Base64;
+use Encode qw(encode_utf8);
+use HttpUtils;
+use DevIo;
+use Digest::SHA qw(sha1_hex);
+
 # use Data::Dumper 'Dumper';
 
 BEGIN {
-    MQTT->import(qw(:all));
-
     GP_Import(qw(
         devspec2array
         CommandDeleteReading
@@ -105,8 +110,25 @@ BEGIN {
         parseParams
         looks_like_number
         EvalSpecials
+        FmtDateTimeRFC1123
+        DevIo_OpenDev
+        DevIo_CloseDev
+        DevIo_SimpleRead
+        DevIo_SimpleWrite
+        HttpUtils_NonblockingGet
+        trim
     ))
 };
+
+
+my %websocketOpcode = (    # Opcode interpretation of the ws "Payload data
+  'continuation'  => 0x00,
+  'text'          => 0x01,
+  'binary'        => 0x02,
+  'close'         => 0x08,
+  'ping'          => 0x09,
+  'pong'          => 0x0A
+);
 
 
 # Device anlegen
@@ -115,20 +137,22 @@ sub Define() {
     my @args = split("[ \t]+", $def);
 
     # Minimale Anzahl der nötigen Argumente vorhanden?
-    return "Invalid number of arguments: define <name> SNIPS IODev DefaultRoom" if (int(@args) < 4);
+    return "Invalid number of arguments: define <name> RHASSPY Host Port DefaultRoom" if (int(@args) < 5);
 
-    my ($name, $type, $IODev, $defaultRoom) = @args;
-    $hash->{MODULE_VERSION} = "0.2";
+    my ($name, $type, $host, $port, $defaultRoom) = @args;
+    $hash->{MODULE_VERSION} = "0.1";
     $hash->{helper}{defaultRoom} = $defaultRoom;
 
-    # IODev setzen und als MQTT Client registrieren
-    $main::attr{$name}{IODev} = $IODev;
-    MQTT::Client_Define($hash, $def);
+    # HOST und PORT setzen
+    $hash->{HOST} = $host;
+    $hash->{PORT} = $port;
 
-    # Benötigte MQTT Topics abonnieren
-    subscribeTopics($hash);
+    # DeviceName für IoDev setzen
+    $hash->{DeviceName} = "$host:$port";
 
-    return undef;
+    # IoDev schließen und anschließend öffnen
+    DevIo_CloseDev($hash);
+	return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened");
 };
 
 
@@ -136,11 +160,8 @@ sub Define() {
 sub Undefine($$) {
     my ($hash, $name) = @_;
 
-    # MQTT Abonnements löschen
-    unsubscribeTopics($hash);
-
-    # Weitere Schritte an das MQTT Modul übergeben, damit man dort als Client ausgetragen wird
-    return MQTT::Client_Undefine($hash);
+    DevIo_CloseDev($hash);
+    return undef;
 }
 
 
@@ -154,21 +175,25 @@ sub Set($$$@) {
     # Say Cmd
     if ($command eq "say") {
         my $text = join (" ", @values);
-        SNIPS::say($hash, $text);
+        RHASSPY::say($hash, $text);
+    }
+    elsif ($command eq "play") {
+        my $text = join (" ", @values);
+        SNIPS::playBytes($hash, $text);
     }
     # TextCommand Cmd
     elsif ($command eq "textCommand") {
         my $text = join (" ", @values);
-        SNIPS::textCommand($hash, $text);
+        RHASSPY::textCommand($hash, $text);
     }
     # Update Model Cmd
     elsif ($command eq "updateModel") {
-        SNIPS::updateModel($hash);
+        RHASSPY::updateModel($hash);
     }
     # Volume Cmd
     elsif ($command eq "volume") {
         my $params = join (" ", @values);
-        SNIPS::setVolume($hash, $params);
+        RHASSPY::setVolume($hash, $params);
     }
 }
 
@@ -188,42 +213,16 @@ sub Attr($$$$) {
 }
 
 
-# Topics abonnieren
-sub subscribeTopics($) {
-    my ($hash) = @_;
-
-    foreach (@topics) {
-        my ($mqos, $mretain, $mtopic, $mvalue, $mcmd) = MQTT::parsePublishCmdStr($_);
-        MQTT::client_subscribe_topic($hash,$mtopic,$mqos,$mretain);
-
-        Log3($hash->{NAME}, 5, "Topic subscribed: " . $_);
-    }
-}
-
-
-# Topics abbestellen
-sub unsubscribeTopics($) {
-    my ($hash) = @_;
-
-    foreach (@topics) {
-        my ($mqos, $mretain, $mtopic, $mvalue, $mcmd) = MQTT::parsePublishCmdStr($_);
-        MQTT::client_unsubscribe_topic($hash,$mtopic);
-
-        Log3($hash->{NAME}, 5, "Topic unsubscribed: " . $_);
-    }
-}
-
-
 # Alle Gerätenamen sammeln
-sub allSnipsNames() {
+sub allRhasspyNames() {
     my @devices, my @sorted;
     my %devicesHash;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devs = devspec2array($devspec);
 
-    # Alle SnipsNames sammeln
+    # Alle RhasspyNames sammeln
     foreach (@devs) {
-        push @devices, split(',', AttrVal($_,"snipsName",undef));
+        push @devices, split(',', AttrVal($_,"rhasspyName",undef));
     }
 
     # Doubletten rausfiltern
@@ -238,20 +237,22 @@ sub allSnipsNames() {
 
 
 # Alle Raumbezeichnungen sammeln
-sub allSnipsRooms() {
+sub allRhasspyRooms() {
     my @rooms, my @sorted;
     my %roomsHash;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devs = devspec2array($devspec);
 
-    # Alle SnipsNames sammeln
+    # Alle RhasspyNames sammeln
     foreach (@devs) {
-        push @rooms, split(',', AttrVal($_,"snipsRoom",undef));
+        push @rooms, split(',', AttrVal($_,"rhasspyRoom",undef));
     }
 
     # Doubletten rausfiltern
     %roomsHash = map { if (defined($_)) { $_, 1 } else { () } } @rooms;
     @rooms = keys %roomsHash;
+
+    if (@rooms <= 0) { push @rooms, "Test"; }
 
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'küche' gefunden wird bevor der eigentliche Treffer 'waschküche' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @rooms;
@@ -261,15 +262,15 @@ sub allSnipsRooms() {
 
 
 # Alle Sender sammeln
-sub allSnipsChannels() {
+sub allRhasspyChannels() {
     my @channels, my @sorted;
     my %channelsHash;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devs = devspec2array($devspec);
 
-    # Alle SnipsNames sammeln
+    # Alle RhasspyNames sammeln
     foreach (@devs) {
-        my @rows = split(/\n/, AttrVal($_,"snipsChannels",undef));
+        my @rows = split(/\n/, AttrVal($_,"rhasspyChannels",undef));
         foreach (@rows) {
             my @tokens = split('=', $_);
             my $channel = shift(@tokens);
@@ -281,6 +282,8 @@ sub allSnipsChannels() {
     %channelsHash = map { if (defined($_)) { $_, 1 } else { () } } @channels;
     @channels = keys %channelsHash;
 
+    if (@channels <= 0) { push @channels, "Test"; }
+
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @channels;
 
@@ -289,15 +292,15 @@ sub allSnipsChannels() {
 
 
 # Alle NumericTypes sammeln
-sub allSnipsTypes() {
+sub allRhasspyTypes() {
     my @types, my @sorted;
     my %typesHash;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devs = devspec2array($devspec);
 
-    # Alle SnipsNames sammeln
+    # Alle RhasspyNames sammeln
     foreach (@devs) {
-        my @mappings = split(/\n/, AttrVal($_,"snipsMapping",undef));
+        my @mappings = split(/\n/, AttrVal($_,"rhasspyMapping",undef));
         foreach (@mappings) {
             # Nur GetNumeric und SetNumeric verwenden
             next unless $_ =~ m/^(SetNumeric|GetNumeric)/;
@@ -312,6 +315,8 @@ sub allSnipsTypes() {
     %typesHash = map { if (defined($_)) { $_, 1 } else { () } } @types;
     @types = keys %typesHash;
 
+    if (@types <= 0) { push @types, "Test"; }
+
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @types;
 
@@ -320,15 +325,15 @@ sub allSnipsTypes() {
 
 
 # Alle Farben sammeln
-sub allSnipsColors() {
+sub allRhasspyColors() {
     my @colors, my @sorted;
     my %colorHash;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devs = devspec2array($devspec);
 
-    # Alle SnipsNames sammeln
+    # Alle RhasspyNames sammeln
     foreach (@devs) {
-        my @rows = split(/\n/, AttrVal($_,"snipsColors",undef));
+        my @rows = split(/\n/, AttrVal($_,"rhasspyColors",undef));
         foreach (@rows) {
             my @tokens = split('=', $_);
             my $color = shift(@tokens);
@@ -340,6 +345,8 @@ sub allSnipsColors() {
     %colorHash = map { if (defined($_)) { $_, 1 } else { () } } @colors;
     @colors = keys %colorHash;
 
+    if (@colors <= 0) { push @colors, "rot"; push @colors, "grün"; push @colors, "blau"; push @colors, "weiß"; }
+
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @colors;
 
@@ -348,7 +355,7 @@ sub allSnipsColors() {
 
 
 # Alle Shortcuts sammeln
-sub allSnipsShortcuts($) {
+sub allRhasspyShortcuts($) {
     my ($hash) = @_;
     my @shortcuts, my @sorted;
 
@@ -359,10 +366,126 @@ sub allSnipsShortcuts($) {
         push @shortcuts, $shortcut;
     }
 
+    if (@shortcuts <= 0) { push @shortcuts, "Test"; }
+
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @shortcuts;
 
     return @sorted
+}
+
+
+# Alle Sentences aus Datei lesen
+sub allRhasspySentences() {
+    my $modPath = AttrVal("global", "modpath", ".");
+    my $fileName = "rhasspy_sentences.ini";
+    my $filePath = "$modPath/FHEM/$fileName";
+
+    my $document = do {
+        local $/ = undef;
+        open my $fh, "<", $filePath;
+        <$fh>;
+    };
+
+    return $document;
+}
+
+
+# Alle Artikel sammeln
+sub allRhasspyArticles() {
+    my @articles;
+    push @articles, "der";
+    push @articles, "die";
+    push @articles, "das";
+
+    return @articles;
+}
+
+
+# Alle Einheiten sammeln
+sub allRhasspyUnits() {
+    my @units;
+    push @units, "Prozent";
+
+    return @units;
+}
+
+
+# Alle Wertetypen sammeln
+sub allRhasspyValueTypes() {
+    my @valueTypes;
+    push @valueTypes, "(Helligkeit | wie hell):Helligkeit";
+    push @valueTypes, "(Temperatur | Farbtemperatur | gemessene Temperatur | wie warm | wie heiß | wie kalt):Temperatur";
+    push @valueTypes, "(Lautstärke | wie laut):Lautstärke";
+    push @valueTypes, "(Sollwert | eingestellte Temperatur | gestellt | eingestellt):Sollwert";
+    push @valueTypes, "(Luftfeuchtigkeit | Luftfeuchte | Feuchte | wie feucht):Luftfeuchtigkeit";
+    push @valueTypes, "(Batterie | Batteriestand | Batteriezustand | Ladestand | Ladezustand | Batteriestatus | Ladestatus):Batterie";
+    push @valueTypes, "(Wasserstand | wie viel Wasser | wieviel Wasser | wie viel Liter | wieviel Liter):Wasserstand";
+
+    return @valueTypes;
+}
+
+
+# Alle Änderungstypen sammeln
+sub allRhasspyChangeTypes() {
+    my @changeTypes;
+    push @changeTypes, "(niedriger | kleiner | weiter zu | weiter runter | weiter schließen | verringern):niedriger";
+    push @changeTypes, "(höher | größer | weiter auf | weiter hoch | weiter öffnen | erhöhen | weiter rauf):höher";
+    push @changeTypes, "lauter";
+    push @changeTypes, "leiser";
+    push @changeTypes, "heller";
+    push @changeTypes, "dunkler";
+    push @changeTypes, "wärmer";
+    push @changeTypes, "kälter";
+
+    return @changeTypes;
+}
+
+
+# Alle Timeraktionen sammeln
+sub allRhasspyTimerActions() {
+    my @timerActions;
+    push @timerActions, "(abbrechen | stoppen | stoppe | stop | beenden | anhalten | breche | beende | halte):abbrechen";
+
+    return @timerActions;
+}
+
+
+# Alle Kommandos sammeln
+sub allRhasspyCommands() {
+    my @commands;
+    push @commands, "(pause | pausieren | anhalten):pause";
+    push @commands, "(play | weiterspielen | fortsetzen):play";
+    push @commands, "(stop | stoppe | stoppen | beenden):stop";
+    push @commands, "(vor | weiter | vorwärts | vorne | nächste | nächstes | nächster | nächsten | überspringen):vor";
+    push @commands, "(zurück | zurück | rückwärts | letzte | letztes | letzter | letzten | vorherige | vorheriges | vorheriger | vorherigen):zurück";
+
+    return @commands;
+}
+
+# Alle An Aus Werte sammeln
+sub allRhasspyOnOffValues() {
+    my @onOffValues;
+    push @onOffValues, "(an | einschalten | ein | anschalten | aktiviere | anmachen | schließe | schließen | runter | zu | raus | ausfahren | rausfahren):an";
+    push @onOffValues, "(aus | ausschalten | ab | abschalten | deaktiviere | ausmachen | öffne | öffnen | rauf | auf | rauf | rein | einfahren | reinfahren):aus";
+
+    return @onOffValues;
+}
+
+
+# Alle Status sammeln
+sub allRhasspyStatus() {
+    my @status;
+    push @status, "(an | ein | angeschaltet | eingeschaltet):an";
+    push @status, "(aus | ausgeschaltet):aus";
+    push @status, "(auf | offen):auf";
+    push @status, "(zu | geschlossen):zu";
+    push @status, "(eingefahren | reingefahren):eingefahren";
+    push @status, "(ausgefahren | rausgefahren):ausgefahren";
+    push @status, "(läuft):läuft";
+    push @status, "(fertig):fertig";
+
+    return @status;
 }
 
 
@@ -389,7 +512,7 @@ sub roomName ($$) {
 sub getDeviceByName($$$) {
     my ($hash, $room, $name) = @_;
     my $device;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devices = devspec2array($devspec);
 
     # devspec2array sendet bei keinen Treffern als einziges Ergebnis den devSpec String zurück
@@ -397,8 +520,8 @@ sub getDeviceByName($$$) {
 
     foreach (@devices) {
         # 2 Arrays bilden mit Namen und Räumen des Devices
-        my @names = split(',', AttrVal($_,"snipsName",undef));
-        my @rooms = split(',', AttrVal($_,"snipsRoom",undef));
+        my @names = split(',', AttrVal($_,"rhasspyName",undef));
+        my @rooms = split(',', AttrVal($_,"rhasspyRoom",undef));
 
         # Case Insensitive schauen ob der gesuchte Name (oder besser Name und Raum) in den Arrays vorhanden ist
         if (grep( /^$name$/i, @names)) {
@@ -418,7 +541,7 @@ sub getDeviceByName($$$) {
 sub getDevicesByIntentAndType($$$$) {
     my ($hash, $room, $intent, $type) = @_;
     my @matchesInRoom, my @matchesOutsideRoom;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devices = devspec2array($devspec);
 
     # devspec2array sendet bei keinen Treffern als einziges Ergebnis den devSpec String zurück
@@ -426,9 +549,9 @@ sub getDevicesByIntentAndType($$$$) {
 
     foreach (@devices) {
         # Array bilden mit Räumen des Devices
-        my @rooms = split(',', AttrVal($_,"snipsRoom",undef));
+        my @rooms = split(',', AttrVal($_,"rhasspyRoom",undef));
         # Mapping mit passendem Intent vorhanden?
-        my $mapping = SNIPS::getMapping($hash, $_, $intent, $type, 1);
+        my $mapping = RHASSPY::getMapping($hash, $_, $intent, $type, 1);
         next unless defined($mapping);
 
         my $mappingType = $mapping->{'type'} if (defined($mapping->{'type'}));
@@ -508,7 +631,7 @@ sub getActiveDeviceForIntentAndType($$$$) {
 sub getDeviceByMediaChannel($$$) {
     my ($hash, $room, $channel) = @_;
     my $device;
-    my $devspec = "room=Snips";
+    my $devspec = "room=Rhasspy";
     my @devices = devspec2array($devspec);
 
     # devspec2array sendet bei keinen Treffern als einziges Ergebnis den devSpec String zurück
@@ -516,9 +639,9 @@ sub getDeviceByMediaChannel($$$) {
 
     foreach (@devices) {
         # Array bilden mit Räumen des Devices
-        my @rooms = split(',', AttrVal($_,"snipsRoom",undef));
+        my @rooms = split(',', AttrVal($_,"rhasspyRoom",undef));
         # Cmd mit passendem Intent vorhanden?
-        my $cmd = getCmd($hash, $_, "snipsChannels", $channel, 1);
+        my $cmd = getCmd($hash, $_, "rhasspyChannels", $channel, 1);
         next unless defined($cmd);
 
         # Erster Treffer wälen, überschreiben falls besserer Treffer (Raum matched auch) kommt
@@ -570,11 +693,11 @@ sub splitMappingString($) {
 }
 
 
-# snipsMapping parsen und gefundene Settings zurückliefern
+# rhasspyMapping parsen und gefundene Settings zurückliefern
 sub getMapping($$$$;$) {
     my ($hash, $device, $intent, $type, $disableLog) = @_;
     my @mappings, my $matchedMapping;
-    my $mappingsString = AttrVal($device, "snipsMapping", undef);
+    my $mappingsString = AttrVal($device, "rhasspyMapping", undef);
 
     if (defined($mappingsString)) {
         # String in einzelne Mappings teilen
@@ -590,7 +713,7 @@ sub getMapping($$$$;$) {
             if (!defined($matchedMapping) || (defined($type) && lc($matchedMapping->{'type'}) ne lc($type) && lc($currentMapping{'type'}) eq lc($type))) {
                 $matchedMapping = \%currentMapping;
 
-                Log3($hash->{NAME}, 5, "snipsMapping selected: $_") if (!defined($disableLog) || (defined($disableLog) && $disableLog != 1));
+                Log3($hash->{NAME}, 5, "rhasspyMapping selected: $_") if (!defined($disableLog) || (defined($disableLog) && $disableLog != 1));
             }
         }
     }
@@ -630,7 +753,7 @@ sub runCmd($$$;$$) {
     # Perl Command
     if ($cmd =~ m/^\s*{.*}\s*$/) {
         # CMD ausführen
-        $returnVal = main::SNIPS_execute($hash, $device, $cmd, $val,$siteId);
+        $returnVal = main::RHASSPY_execute($hash, $device, $cmd, $val, $siteId);
     }
     # String in Anführungszeichen (mit ReplaceSetMagic)
     elsif ($cmd =~ m/^\s*".*"\s*$/) {
@@ -729,8 +852,8 @@ sub parseJSON($$) {
     # JSON Decode und Fehlerüberprüfung
     my $decoded = eval { decode_json(encode_utf8($json)) };
     if ($@) {
-          Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
-          return undef;
+        Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
+        return undef;
     }
 
     # Standard-Keys auslesen
@@ -749,8 +872,8 @@ sub parseJSON($$) {
             my $slotName = $slot->{'slotName'};
             my $slotValue;
 
-            $slotValue = $slot->{'value'}{'value'} if (exists($slot->{'value'}{'value'}));
-            $slotValue = $slot->{'value'} if (exists($slot->{'entity'}) && $slot->{'entity'} eq "snips/duration");
+            $slotValue = $slot->{'value'} if (exists($slot->{'value'}));
+            $slotValue = $slot->{'value'} if (exists($slot->{'entity'}) && $slot->{'entity'} eq "rhasspy/duration");
 
             $data->{$slotName} = $slotValue;
         }
@@ -785,12 +908,12 @@ sub parseJSON($$) {
 # Daten vom MQTT Modul empfangen -> Device und Room ersetzen, dann erneut an NLU übergeben
 sub onmessage($$$) {
     my ($hash, $topic, $message) = @_;
-    my $data = SNIPS::parseJSON($hash, $message);
+    my $data = RHASSPY::parseJSON($hash, $message);
     my $input = $data->{'input'} if defined($data->{'input'});
 
     # Hotword Erkennung
     if ($topic =~ m/^hermes\/hotword/) {
-        my $data = SNIPS::parseJSON($hash, $message);
+        my $data = RHASSPY::parseJSON($hash, $message);
         my $room = roomName($hash, $data);
 
         if (defined($room)) {
@@ -799,7 +922,7 @@ sub onmessage($$$) {
 
             $room =~ s/($keys)/$umlauts{$1}/g;
 
-            if ($topic =~ m/detected/) {
+            if ($topic =~ m/toggleOff/) {
                 readingsSingleUpdate($hash, "listening_" . lc($room), 1, 1);
             } elsif ($topic =~ m/toggleOn/) {
                 readingsSingleUpdate($hash, "listening_" . lc($room), 0, 1);
@@ -808,7 +931,7 @@ sub onmessage($$$) {
     }
 
     # Shortcut empfangen -> Code direkt ausführen
-    elsif ($topic =~ qr/^hermes\/intent\/.*:/ && defined($input) && grep( /^$input$/i, allSnipsShortcuts($hash))) {
+    elsif ($topic =~ qr/^hermes\/intent\/.*/ && defined($input) && grep( /^$input$/i, allRhasspyShortcuts($hash))) {
       my $error;
       my $response = getResponse($hash, "DefaultError");
       my $type      = ($topic eq "hermes/intent/FHEM:TextCommand") ? "text" : "voice";
@@ -826,80 +949,10 @@ sub onmessage($$$) {
       respond($hash, $type, $sessionId, $response);
     }
 
-    # Sprachintent von Snips empfangen -> Geräte- und Raumnamen ersetzen und Request erneut an NLU senden
-    elsif ($topic =~ qr/^hermes\/intent\/.*:/) {
-        my $info, my $sendData;
-        my $device, my $room, my $channel, my $color, my $type;
-        my @devices = allSnipsNames();
-        my @rooms = allSnipsRooms();
-        my @channels = allSnipsChannels();
-        my @colors = allSnipsColors();
-        my @types = allSnipsTypes();
-        my $json, my $infoJson;
-        my $sessionId;
-        my $command = $data->{'input'};
-
-        # Geräte- und Raumbezeichnungen im Kommando gegen die Defaultbezeichnung aus dem Snips-Slot tauschen, damit NLU uns versteht
-        # Alle Werte in ein Array und der Länge nach sortieren, damit z.B. "Jazz Radio" nicht fehlerhafterweise als "Radio" erkannt wird
-        my @keys = (@devices, @rooms, @channels, @colors, @types);
-        my @sortedKeys = sort { length($b) <=> length($a) } @keys;
-
-        foreach my $key (@sortedKeys) {
-            if ($command =~ qr/$key/i) {
-                if (grep( /^$key$/, @devices)) {
-                    $device = lc($key);
-                    $command =~ s/$key/standardgerät/i;
-                }
-                elsif ( grep( /^$key$/, @rooms ) ) {
-                    $room = lc($key);
-                    $command =~ s/$key/standardraum/i;
-                }
-                elsif ( grep( /^$key$/, @channels ) ) {
-                    $channel = lc($key);
-                    $command =~ s/$key/standardsender/i;
-                }
-                elsif ( grep( /^$key$/, @colors ) ) {
-                    $color = lc($key);
-                    $command =~ s/$key/standardfarbe/i;
-                }
-                elsif ( grep( /^$key$/, @types ) ) {
-                    $type = lc($key);
-                    $command =~ s/$key/standardtyp/i;
-                }
-            }
-        }
-
-        # Info Hash wird mit an NLU übergeben um die Rückmeldung später dem Request zuordnen zu können
-        $info = {
-            input       => $data->{'input'},
-            sessionId   => $data->{'sessionId'},
-            siteId      => $data->{'siteId'},
-            Device      => $device,
-            Room        => $room,
-            Channel     => $channel,
-            Color       => $color,
-            Type        => $type
-        };
-        $infoJson = toJSON($info);
-
-        # Message an NLU Senden
-        $sessionId = ($topic eq "hermes/intent/FHEM:TextCommand") ? "fhem.textCommand" :"fhem.voiceCommand";
-        $sendData =  {
-            sessionId => $sessionId,
-            input => $command,
-            id => $infoJson
-        };
-
-        $json = toJSON($sendData);
-        MQTT::send_publish($hash->{IODev}, topic => 'hermes/nlu/query', message => $json, qos => 0, retain => "0");
-
-        Log3($hash->{NAME}, 5, "sending message to NLU: " . $json);
-    }
-
     # Intent von NLU empfangen
-    elsif ($topic eq "hermes/nlu/intentParsed" && ($message =~ m/fhem.voiceCommand/ || $message =~ m/fhem.textCommand/)) {
+    elsif ($topic =~ qr/^hermes\/intent\/.*/) {
         my $intent;
-        my $type = ($message =~ m/fhem.voiceCommand/) ? "voice" : "text";
+        my $type = ($topic eq "hermes/intent/FHEM:TextCommand") ? "text" : "voice";
 
         $data->{'requestType'} = $type;
         $intent = $data->{'intent'};
@@ -912,23 +965,23 @@ sub onmessage($$$) {
 
         # Passenden Intent-Handler aufrufen
         if ($intent eq 'SetOnOff') {
-            SNIPS::handleIntentSetOnOff($hash, $data);
+            RHASSPY::handleIntentSetOnOff($hash, $data);
         } elsif ($intent eq 'GetOnOff') {
-            SNIPS::handleIntentGetOnOff($hash, $data);
+            RHASSPY::handleIntentGetOnOff($hash, $data);
         } elsif ($intent eq 'SetNumeric') {
-            SNIPS::handleIntentSetNumeric($hash, $data);
+            RHASSPY::handleIntentSetNumeric($hash, $data);
         } elsif ($intent eq 'GetNumeric') {
-            SNIPS::handleIntentGetNumeric($hash, $data);
+            RHASSPY::handleIntentGetNumeric($hash, $data);
         } elsif ($intent eq 'Status') {
-            SNIPS::handleIntentStatus($hash, $data);
+            RHASSPY::handleIntentStatus($hash, $data);
         } elsif ($intent eq 'MediaControls') {
-            SNIPS::handleIntentMediaControls($hash, $data);
+            RHASSPY::handleIntentMediaControls($hash, $data);
         } elsif ($intent eq 'MediaChannels') {
-            SNIPS::handleIntentMediaChannels($hash, $data);
+            RHASSPY::handleIntentMediaChannels($hash, $data);
         } elsif ($intent eq 'SetColor') {
-              SNIPS::handleIntentSetColor($hash, $data);
+              RHASSPY::handleIntentSetColor($hash, $data);
         } else {
-            SNIPS::handleCustomIntent($hash, $intent, $data);
+            RHASSPY::handleCustomIntent($hash, $intent, $data);
         }
     }
 }
@@ -946,7 +999,7 @@ sub respond($$$$) {
         };
 
         $json = toJSON($sendData);
-        MQTT::send_publish($hash->{IODev}, topic => 'hermes/dialogueManager/endSession', message => $json, qos => 0, retain => "0");
+        RHASSPY::mqttPublish($hash, 'hermes/dialogueManager/endSession', $json);
         readingsSingleUpdate($hash, "voiceResponse", $response, 1);
     }
     elsif ($type eq "text") {
@@ -974,7 +1027,7 @@ sub getResponse($$) {
 }
 
 
-# Text Kommando an SNIPS
+# Text Kommando an RHASSPY
 sub textCommand($$) {
     my ($hash, $text) = @_;
 
@@ -987,7 +1040,7 @@ sub textCommand($$) {
 }
 
 
-# Sprachausgabe / TTS über SNIPS
+# Sprachausgabe / TTS über RHASSPY
 sub say($$) {
     my ($hash, $cmd) = @_;
     my $sendData, my $json;
@@ -1009,11 +1062,32 @@ sub say($$) {
     };
 
     $json = toJSON($sendData);
-    MQTT::send_publish($hash->{IODev}, topic => 'hermes/tts/say', message => $json, qos => 0, retain => "0");
+    RHASSPY::mqttPublish($hash, 'hermes/tts/say', $json);
 }
 
 
-# Sprachausgabe / TTS über SNIPS
+# Abspielen von Audio Dateien
+sub playBytes($$){
+    my ($hash, $cmd) = @_;
+    my $ifilename = $cmd;
+    my $siteId = "default";
+    my($unnamedParams, $namedParams) = parseParams($cmd);
+    if (defined($namedParams->{'siteId'}) && defined($namedParams->{'file'})) {
+        $siteId = $namedParams->{'siteId'};
+        $ifilename = $namedParams->{'file'};
+    }
+
+    open my $ifile, '<', $ifilename;
+    binmode $ifile;
+
+    # Read the binary data
+    $_ = do { local $/; <$ifile> };
+
+    MQTT::send_publish($hash->{IODev}, topic => 'hermes/audioServer/'.$siteId.'/playBytes/0', message => $_, qos => 0, retain => "0");
+}
+
+
+# Sprachausgabe / TTS über RHASSPY
 sub setVolume($$) {
     my ($hash, $params) = @_;
     my $sendData, my $json;
@@ -1032,60 +1106,170 @@ sub setVolume($$) {
         };
 
         $json = toJSON($sendData);
-        MQTT::send_publish($hash->{IODev}, topic => 'hermes/sound/setvolume', message => $json, qos => 0, retain => "0");
+        RHASSPY::mqttPublish($hash, 'hermes/sound/setvolume', $json);
     }
 }
 
 
-# Update vom Sips Model / ASR Injection
+# Update der Slots und Sentences von Rhasspy
 sub updateModel($) {
     my ($hash) = @_;
-    my @devices = allSnipsNames();
-    my @rooms = allSnipsRooms();
-    my @channels = allSnipsChannels();
-    my @colors = allSnipsColors();
-    my @types = allSnipsTypes();
-    my @shortcuts = allSnipsShortcuts($hash);
+    my @articles = allRhasspyArticles();
+    my @units = allRhasspyUnits();
+    my @valueTypes = allRhasspyValueTypes();
+    my @changeTypes = allRhasspyChangeTypes();
+    my @timerActions = allRhasspyTimerActions();
+    my @commands = allRhasspyCommands();
+    my @onOffValues = allRhasspyOnOffValues;
+    my @status = allRhasspyStatus();
+    my @devices = allRhasspyNames();
+    my @rooms = allRhasspyRooms();
+    my @channels = allRhasspyChannels();
+    my @colors = allRhasspyColors();
+    # TODO: Check what 'types' are
+    #my @types = allRhasspyTypes();
+    my @shortcuts = allRhasspyShortcuts($hash);
 
-    # JSON Struktur erstellen
-    if (@devices > 0 || @rooms > 0 || @channels > 0 || @types > 0 || @shortcuts > 0) {
-      my $json;
-      my $injectData, my $deviceData, my $roomData, my $channelData, my $colorData, my $typeData, my $shortcutData;
-      my @operations, my @deviceOperation, my @roomOperation, my @channelOperation, my @ccolorOperation, my @typeOperation, my @shortcutOperation;
+    my $sentences = allRhasspySentences();
 
-      $deviceData->{'de.fhem.Device'} = \@devices;
-      @deviceOperation = ('add', $deviceData);
 
-      $roomData->{'de.fhem.Room'} = \@rooms;
-      @roomOperation = ('add', $roomData);
+    # Build the JSON for the slots
+    my $slots;
 
-      $channelData->{'de.fhem.MediaChannels'} = \@channels;
-      @channelOperation = ('add', $channelData);
+    $slots->{'fhem/article'} = \@articles;
+    $slots->{'fhem/unit'} = \@units;
+    $slots->{'fhem/valuetype'} = \@valueTypes;
+    $slots->{'fhem/changetype'} = \@changeTypes;
+    $slots->{'fhem/timeraction'} = \@timerActions;
+    $slots->{'fhem/command'} = \@commands;
+    $slots->{'fhem/onoffvalue'} = \@onOffValues;
+    $slots->{'fhem/status'} = \@status;
+    if (@devices > 0) { $slots->{'fhem/device'} = \@devices; }
+    if (@rooms > 0) { $slots->{'fhem/room'} = \@rooms; }
+    if (@channels > 0) { $slots->{'fhem/channel'} = \@channels; }
+    if (@shortcuts > 0) { $slots->{'fhem/shortcut'} = \@shortcuts; }
+    if (@colors > 0) { $slots->{'fhem/color'} = \@colors; }
 
-      $colorData->{'de.fhem.Color'} = \@colors;
-      @ccolorOperation = ('add', $colorData);
+    RHASSPY::postSlots($hash, $slots, sub($) {
+        my ($postSlotsError) = @_;
 
-      $typeData->{'de.fhem.NumericType'} = \@types;
-      @typeOperation = ('add', $typeData);
+        if ($postSlotsError eq "") {
+            RHASSPY::postSentences($hash, $sentences, sub($) {
+                my ($postSentencesError) = @_;
 
-      $shortcutData->{'de.fhem.Shortcuts'} = \@shortcuts;
-      @shortcutOperation = ('add', $shortcutData);
+                if ($postSentencesError eq "") {
+                    RHASSPY::postTrain($hash, $sentences, sub($) {
+                        my ($postTrainError) = @_;
+                    });
+                }
+            });
+        }
+    });
+}
 
-      push(@operations, \@deviceOperation) if @devices > 0;
-      push(@operations, \@roomOperation) if @rooms > 0;
-      push(@operations, \@channelOperation) if @channels > 0;
-      push(@operations, \@ccolorOperation) if @colors > 0;
-      push(@operations, \@typeOperation) if @types > 0;
-      push(@operations, \@shortcutOperation) if @shortcuts > 0;
 
-      $injectData->{'operations'} = \@operations;
-      $json = eval { toJSON($injectData) };
+# Alle FHEM Slots bei Rhasspy ersetzen
+sub postSlots {
+    my ($hash, $slots, $completion) = @_;
+    my $host = $hash->{HOST};
+    my $port = $hash->{PORT};
+    my $url = "http://$host:$port/api/slots?overwrite_all=true";
+    my $json = toJSON($slots);
 
-      Log3($hash->{NAME}, 5, "Injecting data to ASR: $json");
+    Log3($hash->{NAME}, 5, "Posting slots: $json");
 
-      # ASR Inject über MQTT senden
-      MQTT::send_publish($hash->{IODev}, topic => 'hermes/injection/perform', message => $json, qos => 0, retain => "0");
-    }
+    my $params = {
+        url        => $url,
+        method     => "POST",
+        timeout    => 10,
+        noshutdown => 1,
+        data       => $json,
+        hash       => $hash,
+        header     => "Content-Type: application/json"
+    };
+
+    $params->{callback} = sub($$$) {
+        my ($param, $err, $data) = @_;
+
+        if ($err ne "") {
+            Log3($hash->{NAME}, 1, "Post slots error: $err");
+        }
+
+        $completion->($err);
+    };
+
+    HttpUtils_NonblockingGet($params);
+}
+
+
+# Alle FHEM Sentences bei Rhasspy ersetzen
+sub postSentences {
+    my ($hash, $sentences, $completion) = @_;
+    my $host = $hash->{HOST};
+    my $port = $hash->{PORT};
+    my $url = "http://$host:$port/api/sentences";
+
+    my $data = {
+        'intents/fhem_sentences.ini' => $sentences
+    };
+    my $json = toJSON($data);
+
+    Log3($hash->{NAME}, 5, "Posting sentences: $json");
+
+    my $params = {
+        url        => $url,
+        method     => "POST",
+        timeout    => 10,
+        noshutdown => 1,
+        data       => $json,
+        hash       => $hash,
+        header     => "Content-Type: application/json"
+    };
+
+    Log3($hash->{NAME}, 5, "Posting train");
+
+    $params->{callback} = sub($$$) {
+        my ($param, $err, $data) = @_;
+
+        if ($err ne "") {
+            Log3($hash->{NAME}, 1, "Post senteces error: $err");
+        }
+
+        $completion->($err);
+    };
+
+    HttpUtils_NonblockingGet($params);
+}
+
+
+# Rhasspy Training starten
+sub postTrain {
+    my ($hash, $sentences, $completion) = @_;
+    my $host = $hash->{HOST};
+    my $port = $hash->{PORT};
+    my $url = "http://$host:$port/api/train";
+
+    my $params = {
+        url        => $url,
+        method     => "POST",
+        timeout    => 10000,
+        noshutdown => 1,
+        data       => undef,
+        hash       => $hash,
+        header     => "Content-Type: application/json"
+    };
+
+    $params->{callback} = sub($$$) {
+        my ($param, $err, $data) = @_;
+
+        if ($err ne "") {
+            Log3($hash->{NAME}, 1, "Post train error: $err");
+        }
+
+        $completion->($err);
+    };
+
+    HttpUtils_NonblockingGet($params);
 }
 
 
@@ -1093,7 +1277,7 @@ sub updateModel($) {
 sub handleCustomIntent($$$) {
     my ($hash, $intentName, $data) = @_;
     my @intents, my $intent;
-    my $intentsString = AttrVal($hash->{NAME},"snipsIntents",undef);
+    my $intentsString = AttrVal($hash->{NAME},"rhasspyIntents",undef);
     my $response;
     my $error;
 
@@ -1105,7 +1289,7 @@ sub handleCustomIntent($$$) {
         next unless $_ =~ qr/^$intentName/;
 
         $intent = $_;
-        Log3($hash->{NAME}, 5, "snipsIntent selected: $_");
+        Log3($hash->{NAME}, 5, "rhasspyIntent selected: $_");
     }
 
     # Gerät setzen falls Slot Device vorhanden
@@ -1168,7 +1352,7 @@ sub handleIntentSetOnOff($$) {
 
             # Cmd ausführen
             runCmd($hash, $device, $cmd);
-            
+
             # Antwort bestimmen
             $numericValue = ($value eq 'an') ? 1 : 0;
             if (defined($mapping->{'response'})) { $response = getValue($hash, $device, $mapping->{'response'}, $numericValue, $room); }
@@ -1266,7 +1450,7 @@ sub handleIntentSetNumeric($$) {
             if (defined($mapping) && defined($mapping->{'cmd'})) {
                 my $cmd     = $mapping->{'cmd'};
                 my $part    = $mapping->{'part'};
-                my $minVal  = (defined($mapping->{'minVal'})) ? $mapping->{'minVal'} : 0; # Snips kann keine negativen Nummern bisher, daher erzwungener minVal
+                my $minVal  = (defined($mapping->{'minVal'})) ? $mapping->{'minVal'} : 0; # Rhasspy kann keine negativen Nummern bisher, daher erzwungener minVal
                 my $maxVal  = $mapping->{'maxVal'};
                 my $diff    = (defined($value)) ? $value : ((defined($mapping->{'step'})) ? $mapping->{'step'} : 10);
                 my $up      = (defined($change) && ($change =~ m/^(höher|heller|lauter|wärmer)$/)) ? 1 : 0;
@@ -1310,7 +1494,7 @@ sub handleIntentSetNumeric($$) {
 
                     # Cmd ausführen
                     runCmd($hash, $device, $cmd, $newVal);
-                    
+
                     # Antwort festlegen
                     if (defined($mapping->{'response'})) { $response = getValue($hash, $device, $mapping->{'response'}, $newVal, $room); }
                     else { $response = getResponse($hash, "DefaultConfirmation"); }
@@ -1372,20 +1556,20 @@ sub handleIntentGetNumeric($$) {
 
             # Antwort falls mappingType matched
             elsif ($mappingType =~ m/^(Helligkeit|Lautstärke|Sollwert)$/i) { $response = $data->{'Device'} . " ist auf $value gestellt."; }
-            elsif ($mappingType =~ m/^Temperatur$/i) { $response = "Die Temperatur von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value" . ($isNumber ? " Grad" : ""); }
-            elsif ($mappingType =~ m/^Luftfeuchtigkeit$/i) { $response = "Die Luftfeuchtigkeit von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value" . ($isNumber ? " Prozent" : ""); }
-            elsif ($mappingType =~ m/^Batterie$/i) { $response = "Der Batteriestand von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . ($isNumber ?  " beträgt $value Prozent" : " ist $value"); }
-            elsif ($mappingType =~ m/^Wasserstand$/i) { $response = "Der Wasserstand von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value"; }
+            elsif ($mappingType =~ m/^Temperatur$/i) { $response = "Die Temperatur von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value" . ($isNumber ? " Grad" : ""); }
+            elsif ($mappingType =~ m/^Luftfeuchtigkeit$/i) { $response = "Die Luftfeuchtigkeit von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value" . ($isNumber ? " Prozent" : ""); }
+            elsif ($mappingType =~ m/^Batterie$/i) { $response = "Der Batteriestand von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . ($isNumber ?  " beträgt $value Prozent" : " ist $value"); }
+            elsif ($mappingType =~ m/^Wasserstand$/i) { $response = "Der Wasserstand von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value"; }
 
             # Andernfalls Antwort falls type aus Intent matched
             elsif ($type =~ m/^(Helligkeit|Lautstärke|Sollwert)$/) { $response = $data->{'Device'} . " ist auf $value gestellt."; }
-            elsif ($type =~ m/^Temperatur$/i) { $response = "Die Temperatur von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value" . ($isNumber ? " Grad" : ""); }
-            elsif ($type =~ m/^Luftfeuchtigkeit$/i) { $response = "Die Luftfeuchtigkeit von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value" . ($isNumber ? " Prozent" : ""); }
-            elsif ($type =~ m/^Batterie$/i) { $response = "Der Batteriestand von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . ($isNumber ?  " beträgt $value Prozent" : " ist $value"); }
-            elsif ($type =~ m/^Wasserstand$/i) { $response = "Der Wasserstand von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value"; }
+            elsif ($type =~ m/^Temperatur$/i) { $response = "Die Temperatur von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value" . ($isNumber ? " Grad" : ""); }
+            elsif ($type =~ m/^Luftfeuchtigkeit$/i) { $response = "Die Luftfeuchtigkeit von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value" . ($isNumber ? " Prozent" : ""); }
+            elsif ($type =~ m/^Batterie$/i) { $response = "Der Batteriestand von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . ($isNumber ?  " beträgt $value Prozent" : " ist $value"); }
+            elsif ($type =~ m/^Wasserstand$/i) { $response = "Der Wasserstand von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value"; }
 
             # Antwort wenn Custom Type
-            elsif (defined($mappingType)) { $response = "$mappingType von " . (exists $data->{'Device'} ? $data->{'Device'} : $data->{'Room'}) . " beträgt $value"; }
+            elsif (defined($mappingType)) { $response = "$mappingType von " . (exists $data->{'Device'} ? $data->{'Device'} : $room) . " beträgt $value"; }
 
             # Standardantwort falls der Type überhaupt nicht bestimmt werden kann
             else { $response = "Der Wert von " . $data->{'Device'} . " beträgt $value."; }
@@ -1456,7 +1640,7 @@ sub handleIntentMediaControls($$) {
             if (defined($cmd)) {
                 # Cmd ausführen
                 runCmd($hash, $device, $cmd);
-                
+
                 # Antwort festlegen
                 if (defined($mapping->{'response'})) { $response = getValue($hash, $device, $mapping->{'response'}, $command, $room); }
                 else { $response = getResponse($hash, "DefaultConfirmation"); }
@@ -1489,7 +1673,7 @@ sub handleIntentMediaChannels($$) {
             $device = getDeviceByMediaChannel($hash, $room, $channel);
         }
 
-        $cmd = getCmd($hash, $device, "snipsChannels", $channel, undef);
+        $cmd = getCmd($hash, $device, "rhasspyChannels", $channel, undef);
 
         if (defined($device) && defined($cmd)) {
             $response = getResponse($hash, "DefaultConfirmation");
@@ -1519,7 +1703,7 @@ sub handleIntentSetColor($$) {
 
         # Passendes Gerät & Cmd suchen
         $device = getDeviceByName($hash, $room, $data->{'Device'});
-        $cmd = getCmd($hash, $device, "snipsColors", $color, undef);
+        $cmd = getCmd($hash, $device, "rhasspyColors", $color, undef);
 
         if (defined($device) && defined($cmd)) {
             $response = getResponse($hash, "DefaultConfirmation");
@@ -1567,6 +1751,294 @@ sub	ReplaceReadingsVal($@) {
 
     $a =~s/(\[([ari]:)?([a-zA-Z\d._]+):([a-zA-Z\d._\/-]+)(:(t|sec|i|d|r|r\d))?\])/readingsVal($1,$2,$3,$4,$5)/eg;
     return $a;
+}
+
+#######################################
+#       Websocket Functions
+#######################################
+
+sub ioDevReady {
+    my ($hash) = @_;
+    return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened") if ( $hash->{STATE} eq "disconnected" );
+}
+
+sub ioDevOpened {
+    my ($hash) = @_;
+
+    # Connection established, try to do a handshake
+    RHASSPY::websocketWriteHandshake($hash, "/api/mqtt");
+}
+
+sub ioDevRead {
+    my $hash = shift;
+    my $name = $hash->{NAME};
+    my $buf;
+
+    Log3($name, 5, "ioDevRead - ReadFn started");
+    $buf = DevIo_SimpleRead($hash);
+
+    return Log3($name, 3, "ioDevRead - no data received") unless( defined $buf);
+
+    if ($hash->{HELPER}{WEBSOCKETS}) {
+      Log3($name, 4, "ioDevRead - received data, start response processing:\n".unpack("H*", $buf));
+      RHASSPY::websocketDecode($hash, $buf);
+    } elsif($buf =~ /HTTP\/1.1 101/) {
+      Log3($name, 4, "ioDevRead - received HTTP data string, start response processing:\n$buf");
+      RHASSPY::websocketCheckHandshake($hash, $buf);
+    } else {
+      Log3($name, 1, "ioDevRead - corrupted data found:\n$buf");
+    }
+}
+
+sub ioDevWrite {
+    my ($hash, $string) = @_;
+    my $name = $hash->{NAME};
+
+    Log3($name, 4, "ioDevWrite - WriteFn called:\n$string");
+    DevIo_SimpleWrite($hash, $string, 0);
+
+    return undef;
+}
+
+sub websocketWriteHandshake {
+    my ($hash, $path) = @_;
+    my $name = $hash->{NAME};
+    my $host = $hash->{HOST};
+    my $port = $hash->{PORT};
+    my $wsKey = encode_base64(gettimeofday(), '');
+    my $now = time();
+    my $date = FmtDateTimeRFC1123($now);
+
+    my $wsHandshakeCmd = "GET $path HTTP/1.1\r\n";
+    $wsHandshakeCmd .= "Host: $host:$port\r\n";
+    $wsHandshakeCmd .= "Sec-WebSocket-Key: $wsKey\r\n";
+    $wsHandshakeCmd .= "Sec-WebSocket-Version: 13\r\n";
+    $wsHandshakeCmd .= "Upgrade: websocket\r\n";
+    $wsHandshakeCmd .= "Origin: ws://$host:$port$path\r\n";
+    $wsHandshakeCmd .= "Date: $date\r\n";
+    $wsHandshakeCmd .= "Connection: Upgrade\r\n";
+    $wsHandshakeCmd .= "\r\n";
+
+    readingsSingleUpdate($hash, 'state', 'ws_connected', 0);
+    $hash->{HELPER}{WEBSOCKETS} = '0';
+
+    Log3($name, 4, "websocketWriteHandshake - Starting Websocket Handshake");
+    RHASSPY::ioDevWrite($hash, $wsHandshakeCmd);
+
+    $hash->{HELPER}{wsKey}  = $wsKey;
+
+    return undef;
+}
+
+sub websocketCheckHandshake {
+    my ($hash, $response) = @_;
+    my $name = $hash->{NAME};
+
+    # header in Hash wandeln
+    my %header = ();
+    foreach my $line (split("\r\n", $response)) {
+        my ($key, $value) = split( ": ", $line);
+        next if(!$value);
+        $value =~ s/^ //;
+        Log3($name, 4, "websocketCheckHandshake - headertohash |$key|$value|");
+        $header{lc($key)} = $value;
+    }
+
+    # check handshake
+    if (defined($header{'sec-websocket-accept'})) {
+        my $keyAccept   = $header{'sec-websocket-accept'};
+        Log3($name, 5, "websocketCheckHandshake - keyAccept: $keyAccept");
+        my $wsKey = $hash->{HELPER}{wsKey};
+        my $expectedResponse = trim(encode_base64(pack('H*', sha1_hex(trim($wsKey)."258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))));
+        if ($keyAccept eq $expectedResponse) {
+            Log3($name, 4, "websocketCheckHandshake - Successful WS connection to $hash->{DeviceName}");
+            readingsSingleUpdate($hash, 'state', 'ws_connected', 1);
+            $hash->{HELPER}{WEBSOCKETS} = '1';
+
+            # Handshake successful, so subscribe to all topics
+            RHASSPY::mqttSubscribeTopics($hash);
+        } else {
+            DevIo_CloseDev($hash);
+            Log3($name, 3, "websocketCheckHandshake - ERROR: Unsucessfull WS connection to $hash->{DeviceName}");
+            readingsSingleUpdate($hash, 'state', 'ws_handshake-error', 1);
+        }
+    }
+
+    return undef;
+}
+
+sub websocketDecode {
+    my ($hash, $wsString) = @_;
+    my $name = $hash->{NAME};
+
+    Log3($name, 5, "websocketDecode - String:\n" . $wsString);
+
+    while (length $wsString) {
+        my $FIN =    (ord(substr($wsString,0,1)) & 0b10000000) >> 7;
+        my $OPCODE = (ord(substr($wsString,0,1)) & 0b00001111);
+        my $masked = (ord(substr($wsString,1,1)) & 0b10000000) >> 7;
+        my $len =    (ord(substr($wsString,1,1)) & 0b01111111);
+        Log3($name, 4, "websocketDecode - FIN:$FIN OPCODE:$OPCODE MASKED:$masked LEN:$len");
+
+        my $offset = 2;
+        if ($len == 126) {
+            $len = unpack 'n', substr($wsString,$offset,2);
+            $offset += 2;
+        } elsif ($len == 127) {
+            $len = unpack 'q', substr($wsString,$offset,8);
+            $offset += 8;
+        }
+        my $mask;
+        if ($masked) {                     # Mask auslesen falls Masked Bit gesetzt
+            $mask = substr($wsString, $offset, 4);
+            $offset += 4;
+        }
+        #String kürzer als Längenangabe -> Zwischenspeichern?
+        if (length($wsString) < $offset + $len) {
+            Log3($name, 3, "websocketDecode - Incomplete:\n" . $wsString);
+            return;
+        }
+        my $payload = substr($wsString, $offset, $len);     # Daten aus String extrahieren
+        if ($masked) {                      # Daten demaskieren falls maskiert
+           $payload = RHASSPY::websocketMasking($payload, $mask);
+        }
+        Log3($name, 5, "websocketDecode - Payload:\n" . $payload);
+        $wsString = substr($wsString, $offset+$len);       # ausgewerteten Stringteil entfernen
+        if ($FIN) {
+            RHASSPY::websocketPong($hash) if ($OPCODE == $websocketOpcode{"ping"});
+        }
+
+        RHASSPY::mqttDecode($hash, $payload);
+    }
+}
+
+# 0                   1                   2                   3
+# 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+# +-+-+-+-+-------+-+-------------+-------------------------------+
+# |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+# |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+# |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+# | |1|2|3|       |K|             |                               |
+# +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+# |     Extended payload length continued, if payload len == 127  |
+# + - - - - - - - - - - - - - - - +-------------------------------+
+# |                               |Masking-key, if MASK set to 1  |
+# +-------------------------------+-------------------------------+
+##  | Masking-key (continued)       |          Payload Data         |
+# +-------------------------------- - - - - - - - - - - - - - - - +
+# :                     Payload Data continued ...                :
+# + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+# |                     Payload Data continued ...                |
+# +---------------------------------------------------------------+
+# https://tools.ietf.org/html/draft-ietf-hybi-thewebsocketprotocol-17
+sub websocketEncode {
+    my ($hash, $payload, $type, $masked) = @_;
+    my $name = $hash->{NAME};
+    $type //= "text";
+    $masked //= 1;    # Mask   If set to 1, a masking key is present in masking-key. 1 for all frames sent from client to server
+    my $RSV = 0;
+    my $FIN = 1;    # FIN    Indicates that this is the final fragment in a message. The first fragment MAY also be the final fragment.
+    my $MAX_PAYLOAD_SIZE = 65536;
+    my $wsString ='';
+    $wsString .= pack 'C', ($websocketOpcode{$type} | $RSV | ($FIN ? 128 : 0));
+    my $len = length($payload);
+
+    Log3($name, 3, "websocketEncode - Payload: " . $payload);
+    return "payload to big" if ($len > $MAX_PAYLOAD_SIZE);
+
+    if ($len <= 125) {
+        $len |= 0x80 if $masked;
+        $wsString .= pack 'C', $len;
+    } elsif ($len <= 0xffff) {
+        $wsString .= pack 'C', 126 + ($masked ? 128 : 0);
+        $wsString .= pack 'n', $len;
+    } else {
+        $wsString .= pack 'C', 127 + ($masked ? 128 : 0);
+        $wsString .= pack 'N', $len >> 32;
+        $wsString .= pack 'N', ($len & 0xffffffff);
+    }
+    if ($masked) {
+        my $mask = pack 'N', int(rand(2**32));
+        $wsString .= $mask;
+        $wsString .= RHASSPY::websocketMasking($payload, $mask);
+    } else {
+        $wsString .= $payload;
+    }
+
+    Log3($name, 3, "websocketEncode - String: " . unpack('H*', $wsString));
+    RHASSPY::ioDevWrite($hash, $wsString);
+}
+
+sub websocketMasking {
+    my ($payload, $mask) = @_;
+    $mask = $mask x (int(length($payload) / 4) + 1);
+    $mask = substr($mask, 0, length($payload));
+    $payload = $payload ^ $mask;
+    return $payload;
+}
+
+sub websocketPong {
+    my $hash = shift;
+    my $name = $hash->{NAME};
+    Log3($name, 4, "websocketPong");
+    websocketEncode($hash, undef, "pong");
+}
+
+#######################################
+#       MQTT Functions
+#######################################
+
+sub mqttDecode {
+    my ($hash, $string) = @_;
+
+    # JSON Decode und Fehlerüberprüfung
+    my $decoded = eval { decode_json(encode_utf8($string)) };
+    if ($@) {
+        Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
+        return undef;
+    }
+
+    my $topic = $decoded->{'topic'};
+    my $payload = $decoded->{'payload'};
+    my $message = toJSON($payload);
+
+    RHASSPY::onmessage($hash, $topic, $message);
+}
+
+sub mqttPublish {
+    my ($hash, $topic, $message) = @_;
+
+    my $sendData =  {
+        type => "publish",
+        topic => $topic,
+        payload => $message
+    };
+
+    my $json = encode_json($sendData);
+    RHASSPY::websocketEncode($hash, $json);
+}
+
+sub mqttSubscribe {
+    my ($hash, $topic) = @_;
+
+    my $sendData =  {
+        type => "subscribe",
+        topic => $topic
+    };
+
+    my $json = encode_json($sendData);
+    RHASSPY::websocketEncode($hash, $json);
+}
+
+sub mqttSubscribeTopics {
+    my ($hash) = @_;
+
+    foreach (@topics) {
+        my $topic = $_;
+        RHASSPY::mqttSubscribe($hash, $topic);
+
+        Log3($hash->{NAME}, 5, "mqttSubscribeTopics - Topic subscribed: " . $topic);
+    }
 }
 
 1;
