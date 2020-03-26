@@ -850,7 +850,7 @@ sub parseJSON($$) {
     my $data;
 
     # JSON Decode und Fehlerüberprüfung
-    my $decoded = eval { decode_json(encode_utf8($json)) };
+    my $decoded = eval { decode_json($json) };
     if ($@) {
         Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
         return undef;
@@ -881,7 +881,7 @@ sub parseJSON($$) {
 
     # Falls Info Dict angehängt ist, handelt es sich um einen mit Standardwerten über NLU umgeleiteten Request. -> Originalwerte wiederherstellen
     if (exists($decoded->{'id'})) {
-        my $info = eval { decode_json(encode_utf8($decoded->{'id'})) };
+        my $info = eval { decode_json($decoded->{'id'}) };
         if ($@) {
             $info = undef;
         }
@@ -903,7 +903,6 @@ sub parseJSON($$) {
 
     return $data;
 }
-
 
 # Daten vom MQTT Modul empfangen -> Device und Room ersetzen, dann erneut an NLU übergeben
 sub onmessage($$$) {
@@ -1753,6 +1752,13 @@ sub	ReplaceReadingsVal($@) {
     return $a;
 }
 
+sub unicodeDecode {
+    my ($string) = @_;
+    $string =~ s/\\u(....)/chr(hex($1))/eg;
+
+    return $string;
+}
+
 #######################################
 #       Websocket Functions
 #######################################
@@ -1992,7 +1998,10 @@ sub mqttDecode {
     my ($hash, $string) = @_;
 
     # JSON Decode und Fehlerüberprüfung
-    my $decoded = eval { decode_json(encode_utf8($string)) };
+    my $decodedString = RHASSPY::unicodeDecode($string);
+    $decodedString = encode_utf8($decodedString);
+
+    my $decoded = eval { decode_json($decodedString) };
     if ($@) {
         Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
         return undef;
