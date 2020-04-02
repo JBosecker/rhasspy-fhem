@@ -11,7 +11,6 @@
 use strict;
 use warnings;
 
-
 my %gets = (
     "version" => "",
     "status" => ""
@@ -22,7 +21,8 @@ my %sets = (
     "play" => "",
     "updateModel" => "",
     "textCommand" => "",
-    "volume" => ""
+    "volume" => "",
+    "reconnect" => ""
 );
 
 # MQTT Topics die das Modul automatisch abonniert
@@ -85,6 +85,7 @@ use Encode qw(encode_utf8);
 use HttpUtils;
 use DevIo;
 use Digest::SHA qw(sha1_hex);
+use utf8;
 
 # use Data::Dumper 'Dumper';
 
@@ -150,9 +151,7 @@ sub Define() {
     # DeviceName für IoDev setzen
     $hash->{DeviceName} = "$host:$port";
 
-    # IoDev schließen und anschließend öffnen
-    DevIo_CloseDev($hash);
-	return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened");
+    RHASSPY::ioDevReconnect($hash);
 };
 
 
@@ -194,6 +193,10 @@ sub Set($$$@) {
     elsif ($command eq "volume") {
         my $params = join (" ", @values);
         RHASSPY::setVolume($hash, $params);
+    }
+    # Reconnect
+    elsif ($command eq "reconnect") {
+        RHASSPY::ioDevReconnect($hash);
     }
 }
 
@@ -399,6 +402,34 @@ sub allRhasspyArticles() {
     push @articles, "das";
 
     return @articles;
+}
+
+
+# Alle Präpositionen für Räume sammeln
+sub allRhasspyRoomPrepositions() {
+    my @prepositions;
+    push @prepositions, "in der";
+    push @prepositions, "in dem";
+    push @prepositions, "im";
+    push @prepositions, "auf der";
+    push @prepositions, "auf dem";
+
+
+    return @prepositions;
+}
+
+
+# Alle Präpositionen für Geräte sammeln
+sub allRhasspyDevicePrepositions() {
+    my @prepositions;
+    push @prepositions, "vom";
+    push @prepositions, "von";
+    push @prepositions, "von dem";
+    push @prepositions, "von der";
+    push @prepositions, "des";
+    push @prepositions, "im";
+
+    return @prepositions;
 }
 
 
@@ -850,7 +881,7 @@ sub parseJSON($$) {
     my $data;
 
     # JSON Decode und Fehlerüberprüfung
-    my $decoded = eval { decode_json($json) };
+    my $decoded = eval { decode_json(encode_utf8($json)) };
     if ($@) {
         Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
         return undef;
@@ -912,7 +943,6 @@ sub onmessage($$$) {
 
     # Hotword Erkennung
     if ($topic =~ m/^hermes\/hotword/) {
-        my $data = RHASSPY::parseJSON($hash, $message);
         my $room = roomName($hash, $data);
 
         if (defined($room)) {
@@ -997,8 +1027,7 @@ sub respond($$$$) {
             text => $response
         };
 
-        $json = toJSON($sendData);
-        RHASSPY::mqttPublish($hash, 'hermes/dialogueManager/endSession', $json);
+        RHASSPY::mqttPublish($hash, 'hermes/dialogueManager/endSession', $sendData);
         readingsSingleUpdate($hash, "voiceResponse", $response, 1);
     }
     elsif ($type eq "text") {
@@ -1060,8 +1089,7 @@ sub say($$) {
         sessionId => "0"
     };
 
-    $json = toJSON($sendData);
-    RHASSPY::mqttPublish($hash, 'hermes/tts/say', $json);
+    RHASSPY::mqttPublish($hash, 'hermes/tts/say', $sendData);
 }
 
 
@@ -1082,7 +1110,9 @@ sub playBytes($$){
     # Read the binary data
     $_ = do { local $/; <$ifile> };
 
-    MQTT::send_publish($hash->{IODev}, topic => 'hermes/audioServer/'.$siteId.'/playBytes/0', message => $_, qos => 0, retain => "0");
+    # TODO: Check if that works
+    #MQTT::send_publish($hash->{IODev}, topic => 'hermes/audioServer/'.$siteId.'/playBytes/0', message => $_, qos => 0, retain => "0");
+    RHASSPY::mqttPublish($hash, 'hermes/audioServer/'.$siteId.'/playBytes/0', $_);
 }
 
 
@@ -1104,8 +1134,7 @@ sub setVolume($$) {
             volume => $volume
         };
 
-        $json = toJSON($sendData);
-        RHASSPY::mqttPublish($hash, 'hermes/sound/setvolume', $json);
+        RHASSPY::mqttPublish($hash, 'hermes/sound/setvolume', $sendData);
     }
 }
 
@@ -1114,6 +1143,8 @@ sub setVolume($$) {
 sub updateModel($) {
     my ($hash) = @_;
     my @articles = allRhasspyArticles();
+    my @roomPrepositions = allRhasspyRoomPrepositions();
+    my @devicePrepositions = allRhasspyDevicePrepositions();
     my @units = allRhasspyUnits();
     my @valueTypes = allRhasspyValueTypes();
     my @changeTypes = allRhasspyChangeTypes();
@@ -1136,6 +1167,8 @@ sub updateModel($) {
     my $slots;
 
     $slots->{'fhem/article'} = \@articles;
+    $slots->{'fhem/roompreposition'} = \@roomPrepositions;
+    $slots->{'fhem/devicepreposition'} = \@devicePrepositions;
     $slots->{'fhem/unit'} = \@units;
     $slots->{'fhem/valuetype'} = \@valueTypes;
     $slots->{'fhem/changetype'} = \@changeTypes;
@@ -1763,6 +1796,14 @@ sub unicodeDecode {
 #       Websocket Functions
 #######################################
 
+sub ioDevReconnect {
+    my ($hash) = @_;
+
+    # IoDev schließen und anschließend öffnen
+    DevIo_CloseDev($hash);
+    return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened");
+}
+
 sub ioDevReady {
     my ($hash) = @_;
     return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened") if ( $hash->{STATE} eq "disconnected" );
@@ -1996,20 +2037,22 @@ sub websocketPong {
 
 sub mqttDecode {
     my ($hash, $string) = @_;
+    my $name = $hash->{NAME};
 
     # JSON Decode und Fehlerüberprüfung
-    my $decodedString = RHASSPY::unicodeDecode($string);
-    $decodedString = encode_utf8($decodedString);
+    my $unicodeDecodedString = RHASSPY::unicodeDecode($string);
+    my $utf8EncodedString = encode_utf8($unicodeDecodedString);
+    Log3($name, 5, "mqttDecode - Decoded string: $utf8EncodedString");
 
-    my $decoded = eval { decode_json($decodedString) };
+    my $decoded = eval { decode_json($utf8EncodedString) };
     if ($@) {
-        Log3($hash->{NAME}, 1, "JSON decoding error: " . $@);
+        Log3($name, 1, "mqttDecode - JSON decoding error: " . $@);
         return undef;
     }
 
     my $topic = $decoded->{'topic'};
     my $payload = $decoded->{'payload'};
-    my $message = toJSON($payload);
+    my $message = encode_json($payload);
 
     RHASSPY::onmessage($hash, $topic, $message);
 }
