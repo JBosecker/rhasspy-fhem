@@ -81,7 +81,7 @@ use Encode;
 use Time::HiRes qw(gettimeofday);
 use JSON qw(decode_json encode_json);
 use MIME::Base64;
-use Encode qw(encode_utf8);
+use Encode qw(encode_utf8 decode_utf8);
 use HttpUtils;
 use DevIo;
 use Digest::SHA qw(sha1_hex);
@@ -225,7 +225,7 @@ sub allRhasspyNames() {
 
     # Alle RhasspyNames sammeln
     foreach (@devs) {
-        push @devices, split(',', AttrVal($_,"rhasspyName",undef));
+        push @devices, split(',', decode_utf8(AttrVal($_,"rhasspyName",undef)));
     }
 
     # Doubletten rausfiltern
@@ -248,14 +248,12 @@ sub allRhasspyRooms() {
 
     # Alle RhasspyNames sammeln
     foreach (@devs) {
-        push @rooms, split(',', AttrVal($_,"rhasspyRoom",undef));
+        push @rooms, split(',', decode_utf8(AttrVal($_,"rhasspyRoom",undef)));
     }
 
     # Doubletten rausfiltern
     %roomsHash = map { if (defined($_)) { $_, 1 } else { () } } @rooms;
     @rooms = keys %roomsHash;
-
-    if (@rooms <= 0) { push @rooms, "Test"; }
 
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'küche' gefunden wird bevor der eigentliche Treffer 'waschküche' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @rooms;
@@ -273,7 +271,7 @@ sub allRhasspyChannels() {
 
     # Alle RhasspyNames sammeln
     foreach (@devs) {
-        my @rows = split(/\n/, AttrVal($_,"rhasspyChannels",undef));
+        my @rows = split(/\n/, decode_utf8(AttrVal($_,"rhasspyChannels",undef)));
         foreach (@rows) {
             my @tokens = split('=', $_);
             my $channel = shift(@tokens);
@@ -284,8 +282,6 @@ sub allRhasspyChannels() {
     # Doubletten rausfiltern
     %channelsHash = map { if (defined($_)) { $_, 1 } else { () } } @channels;
     @channels = keys %channelsHash;
-
-    if (@channels <= 0) { push @channels, "Test"; }
 
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @channels;
@@ -303,7 +299,7 @@ sub allRhasspyTypes() {
 
     # Alle RhasspyNames sammeln
     foreach (@devs) {
-        my @mappings = split(/\n/, AttrVal($_,"rhasspyMapping",undef));
+        my @mappings = split(/\n/, decode_utf8(AttrVal($_,"rhasspyMapping",undef)));
         foreach (@mappings) {
             # Nur GetNumeric und SetNumeric verwenden
             next unless $_ =~ m/^(SetNumeric|GetNumeric)/;
@@ -317,8 +313,6 @@ sub allRhasspyTypes() {
     # Doubletten rausfiltern
     %typesHash = map { if (defined($_)) { $_, 1 } else { () } } @types;
     @types = keys %typesHash;
-
-    if (@types <= 0) { push @types, "Test"; }
 
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @types;
@@ -336,7 +330,7 @@ sub allRhasspyColors() {
 
     # Alle RhasspyNames sammeln
     foreach (@devs) {
-        my @rows = split(/\n/, AttrVal($_,"rhasspyColors",undef));
+        my @rows = split(/\n/, decode_utf8(AttrVal($_,"rhasspyColors",undef)));
         foreach (@rows) {
             my @tokens = split('=', $_);
             my $color = shift(@tokens);
@@ -347,8 +341,6 @@ sub allRhasspyColors() {
     # Doubletten rausfiltern
     %colorHash = map { if (defined($_)) { $_, 1 } else { () } } @colors;
     @colors = keys %colorHash;
-
-    if (@colors <= 0) { push @colors, "rot"; push @colors, "grün"; push @colors, "blau"; push @colors, "weiß"; }
 
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @colors;
@@ -362,14 +354,12 @@ sub allRhasspyShortcuts($) {
     my ($hash) = @_;
     my @shortcuts, my @sorted;
 
-    my @rows = split(/\n/, AttrVal($hash->{NAME},"shortcuts",undef));
+    my @rows = split(/\n/, decode_utf8(AttrVal($hash->{NAME},"shortcuts",undef)));
     foreach (@rows) {
         my @tokens = split('=', $_);
         my $shortcut = shift(@tokens);
         push @shortcuts, $shortcut;
     }
-
-    if (@shortcuts <= 0) { push @shortcuts, "Test"; }
 
     # Längere Werte zuerst, damit bei Ersetzungen z.B. nicht 'S.W.R.' gefunden wird bevor der eigentliche Treffer 'S.W.R.3' versucht wurde
     @sorted = sort { length($b) <=> length($a) } @shortcuts;
@@ -386,11 +376,11 @@ sub allRhasspySentences() {
 
     my $document = do {
         local $/ = undef;
-        open my $fh, "<", $filePath;
+        open my $fh, "<:encoding(UTF-8)", $filePath;
         <$fh>;
     };
 
-    return $document;
+    return decode_utf8($document);
 }
 
 
@@ -551,8 +541,8 @@ sub getDeviceByName($$$) {
 
     foreach (@devices) {
         # 2 Arrays bilden mit Namen und Räumen des Devices
-        my @names = split(',', AttrVal($_,"rhasspyName",undef));
-        my @rooms = split(',', AttrVal($_,"rhasspyRoom",undef));
+        my @names = split(',', decode_utf8(AttrVal($_,"rhasspyName",undef)));
+        my @rooms = split(',', decode_utf8(AttrVal($_,"rhasspyRoom",undef)));
 
         # Case Insensitive schauen ob der gesuchte Name (oder besser Name und Raum) in den Arrays vorhanden ist
         if (grep( /^$name$/i, @names)) {
@@ -580,7 +570,7 @@ sub getDevicesByIntentAndType($$$$) {
 
     foreach (@devices) {
         # Array bilden mit Räumen des Devices
-        my @rooms = split(',', AttrVal($_,"rhasspyRoom",undef));
+        my @rooms = split(',', decode_utf8(AttrVal($_,"rhasspyRoom",undef)));
         # Mapping mit passendem Intent vorhanden?
         my $mapping = RHASSPY::getMapping($hash, $_, $intent, $type, 1);
         next unless defined($mapping);
@@ -670,7 +660,7 @@ sub getDeviceByMediaChannel($$$) {
 
     foreach (@devices) {
         # Array bilden mit Räumen des Devices
-        my @rooms = split(',', AttrVal($_,"rhasspyRoom",undef));
+        my @rooms = split(',', decode_utf8(AttrVal($_,"rhasspyRoom",undef)));
         # Cmd mit passendem Intent vorhanden?
         my $cmd = getCmd($hash, $_, "rhasspyChannels", $channel, 1);
         next unless defined($cmd);
@@ -728,7 +718,7 @@ sub splitMappingString($) {
 sub getMapping($$$$;$) {
     my ($hash, $device, $intent, $type, $disableLog) = @_;
     my @mappings, my $matchedMapping;
-    my $mappingsString = AttrVal($device, "rhasspyMapping", undef);
+    my $mappingsString = decode_utf8(AttrVal($device, "rhasspyMapping", undef));
 
     if (defined($mappingsString)) {
         # String in einzelne Mappings teilen
@@ -756,7 +746,7 @@ sub getMapping($$$$;$) {
 sub getCmd($$$$;$) {
     my ($hash, $device, $reading, $key, $disableLog) = @_;
     my @rows, my $cmd;
-    my $attrString = AttrVal($device, $reading, undef);
+    my $attrString = decode_utf8(AttrVal($device, $reading, undef));
 
     # String in einzelne Mappings teilen
     @rows = split(/\n/, $attrString);
@@ -903,7 +893,7 @@ sub parseJSON($$) {
             my $slotName = $slot->{'slotName'};
             my $slotValue;
 
-            $slotValue = $slot->{'value'} if (exists($slot->{'value'}));
+            $slotValue = $slot->{'value'}{'value'} if (exists($slot->{'value'}) && exists($slot->{'value'}{'value'}));
             $slotValue = $slot->{'value'} if (exists($slot->{'entity'}) && $slot->{'entity'} eq "rhasspy/duration");
 
             $data->{$slotName} = $slotValue;
@@ -927,12 +917,18 @@ sub parseJSON($$) {
         $data->{'Type'} = $info->{'Type'} if defined($info->{'Type'});
     }
 
+    my $result;
+
     foreach (keys %{ $data }) {
         my $value = $data->{$_};
-        Log3($hash->{NAME}, 5, "Parsed value: $value for key: $_");
+        my $decodedKey = decode_utf8($_);
+        my $decodedValue = decode_utf8($value);
+
+        $result->{$decodedKey} = $decodedValue;
+        Log3($hash->{NAME}, 5, "Parsed value: $decodedValue (hex: " . unpack('H*', $decodedValue) . ") for key: $decodedKey");
     }
 
-    return $data;
+    return $result;
 }
 
 # Daten vom MQTT Modul empfangen -> Device und Room ersetzen, dann erneut an NLU übergeben
@@ -946,15 +942,15 @@ sub onmessage($$$) {
         my $room = roomName($hash, $data);
 
         if (defined($room)) {
-            my %umlauts = ("ä" => "ae", "Ä" => "Ae", "ü" => "ue", "Ü" => "Ue", "ö" => "oe", "Ö" => "Oe", "ß" => "ss" );
-            my $keys = join ("|", keys(%umlauts));
+            #my %umlauts = ("ä" => "ae", "Ä" => "Ae", "ü" => "ue", "Ü" => "Ue", "ö" => "oe", "Ö" => "Oe", "ß" => "ss" );
+            #my $keys = join ("|", keys(%umlauts));
 
-            $room =~ s/($keys)/$umlauts{$1}/g;
+            #$room =~ s/($keys)/$umlauts{$1}/g;
 
             if ($topic =~ m/toggleOff/) {
-                readingsSingleUpdate($hash, "listening_" . lc($room), 1, 1);
+                readingsSingleUpdate($hash, "listening_" . lc(encode_utf8($room)), 1, 1);
             } elsif ($topic =~ m/toggleOn/) {
-                readingsSingleUpdate($hash, "listening_" . lc($room), 0, 1);
+                readingsSingleUpdate($hash, "listening_" . lc(encode_utf8($room)), 0, 1);
             }
         }
     }
@@ -989,7 +985,7 @@ sub onmessage($$$) {
         # Readings updaten
         readingsBeginUpdate($hash);
         readingsBulkUpdate($hash, "lastIntentTopic", $topic);
-        readingsBulkUpdate($hash, "lastIntentPayload", toJSON($data));
+        readingsBulkUpdate($hash, "lastIntentPayload", encode_json($data));
         readingsEndUpdate($hash, 1);
 
         # Passenden Intent-Handler aufrufen
@@ -1028,11 +1024,11 @@ sub respond($$$$) {
         };
 
         RHASSPY::mqttPublish($hash, 'hermes/dialogueManager/endSession', $sendData);
-        readingsSingleUpdate($hash, "voiceResponse", $response, 1);
+        readingsSingleUpdate($hash, "voiceResponse", encode_utf8($response), 1);
     }
     elsif ($type eq "text") {
         Log3($hash->{NAME}, 5, "Response: $response");
-        readingsSingleUpdate($hash, "textResponse", $response, 1);
+        readingsSingleUpdate($hash, "textResponse", encode_utf8($response), 1);
     }
 }
 
@@ -1060,7 +1056,7 @@ sub textCommand($$) {
     my ($hash, $text) = @_;
 
     my $data = { input => $text };
-    my $message = toJSON($data);
+    my $message = encode_json($data);
 
     # Send fake command, so it's forwarded to NLU
     my $topic = "hermes/intent/FHEM:TextCommand";
@@ -1160,28 +1156,46 @@ sub updateModel($) {
     #my @types = allRhasspyTypes();
     my @shortcuts = allRhasspyShortcuts($hash);
 
-    my $sentences = allRhasspySentences();
-
-
     # Build the JSON for the slots
     my $slots;
 
-    $slots->{'fhem/article'} = \@articles;
-    $slots->{'fhem/roompreposition'} = \@roomPrepositions;
-    $slots->{'fhem/devicepreposition'} = \@devicePrepositions;
-    $slots->{'fhem/unit'} = \@units;
-    $slots->{'fhem/valuetype'} = \@valueTypes;
-    $slots->{'fhem/changetype'} = \@changeTypes;
-    $slots->{'fhem/timeraction'} = \@timerActions;
-    $slots->{'fhem/command'} = \@commands;
-    $slots->{'fhem/onoffvalue'} = \@onOffValues;
-    $slots->{'fhem/status'} = \@status;
+    if (@articles > 0) { $slots->{'fhem/article'} = \@articles; }
+    if (@roomPrepositions > 0) { $slots->{'fhem/roompreposition'} = \@roomPrepositions; }
+    if (@devicePrepositions > 0) { $slots->{'fhem/devicepreposition'} = \@devicePrepositions; }
+    if (@units > 0) { $slots->{'fhem/unit'} = \@units; }
+    if (@valueTypes > 0) { $slots->{'fhem/valuetype'} = \@valueTypes; }
+    if (@changeTypes > 0) { $slots->{'fhem/changetype'} = \@changeTypes; }
+    if (@timerActions > 0) { $slots->{'fhem/timeraction'} = \@timerActions; }
+    if (@commands > 0) { $slots->{'fhem/command'} = \@commands; }
+    if (@onOffValues > 0) { $slots->{'fhem/onoffvalue'} = \@onOffValues; }
+    if (@status > 0) { $slots->{'fhem/status'} = \@status; }
     if (@devices > 0) { $slots->{'fhem/device'} = \@devices; }
     if (@rooms > 0) { $slots->{'fhem/room'} = \@rooms; }
     if (@channels > 0) { $slots->{'fhem/channel'} = \@channels; }
     if (@shortcuts > 0) { $slots->{'fhem/shortcut'} = \@shortcuts; }
     if (@colors > 0) { $slots->{'fhem/color'} = \@colors; }
 
+    # Search for not available slots in sentences and remove these
+    my $sentences = allRhasspySentences();
+    my @sentenceLines = split /\n/, $sentences;
+
+    for (my $i = $#sentenceLines; $i > -1; $i--) {
+        my $sentence = $sentenceLines[$i];
+        my @matches = $sentence =~ /\$([^)\]\s]*)/gm;
+
+        foreach (@matches) {
+            my $match = $_;
+
+            if (!(exists $slots->{$match})) {
+                splice @sentenceLines, $i, 1;
+                last;
+            }
+        }
+    }
+
+    $sentences = join("\n", @sentenceLines);
+
+    # Send slots, sentences and afterwards trigger training
     RHASSPY::postSlots($hash, $slots, sub($) {
         my ($postSlotsError) = @_;
 
@@ -1206,9 +1220,10 @@ sub postSlots {
     my $host = $hash->{HOST};
     my $port = $hash->{PORT};
     my $url = "http://$host:$port/api/slots?overwrite_all=true";
-    my $json = toJSON($slots);
+    my $json = encode_json($slots);
 
-    Log3($hash->{NAME}, 5, "Posting slots: $json");
+    Log3($hash->{NAME}, 5, "postSlots - $json");
+    Log3($hash->{NAME}, 5, "postSlots - hex: " . unpack("H*", $json));
 
     my $params = {
         url        => $url,
@@ -1244,9 +1259,10 @@ sub postSentences {
     my $data = {
         'intents/fhem_sentences.ini' => $sentences
     };
-    my $json = toJSON($data);
+    my $json = encode_json($data);
 
-    Log3($hash->{NAME}, 5, "Posting sentences: $json");
+    Log3($hash->{NAME}, 5, "postSentences - $json");
+    Log3($hash->{NAME}, 5, "postSentences - hex: " . unpack("H*", $json));
 
     my $params = {
         url        => $url,
@@ -1309,7 +1325,7 @@ sub postTrain {
 sub handleCustomIntent($$$) {
     my ($hash, $intentName, $data) = @_;
     my @intents, my $intent;
-    my $intentsString = AttrVal($hash->{NAME},"rhasspyIntents",undef);
+    my $intentsString = decode_utf8(AttrVal($hash->{NAME},"rhasspyIntents",undef));
     my $response;
     my $error;
 
@@ -2040,8 +2056,11 @@ sub mqttDecode {
     my $name = $hash->{NAME};
 
     # JSON Decode und Fehlerüberprüfung
+    Log3($name, 5, "mqttDecode - String Hex: " . unpack('H*', $string));
     my $unicodeDecodedString = RHASSPY::unicodeDecode($string);
+    Log3($name, 5, "mqttDecode - unicodeDecodedString Hex: " . unpack('H*', $unicodeDecodedString));
     my $utf8EncodedString = encode_utf8($unicodeDecodedString);
+    Log3($name, 5, "mqttDecode - utf8EncodedString Hex: " . unpack('H*', $utf8EncodedString));
     Log3($name, 5, "mqttDecode - Decoded string: $utf8EncodedString");
 
     my $decoded = eval { decode_json($utf8EncodedString) };
