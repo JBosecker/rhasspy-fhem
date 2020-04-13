@@ -435,13 +435,20 @@ sub allRhasspyUnits() {
 # Alle Wertetypen sammeln
 sub allRhasspyValueTypes() {
     my @valueTypes;
-    push @valueTypes, "(Helligkeit | wie hell):Helligkeit";
-    push @valueTypes, "(Temperatur | Farbtemperatur | gemessene Temperatur | wie warm | wie heiß | wie kalt):Temperatur";
-    push @valueTypes, "(Lautstärke | wie laut):Lautstärke";
-    push @valueTypes, "(Sollwert | eingestellte Temperatur | gestellt | eingestellt):Sollwert";
-    push @valueTypes, "(Luftfeuchtigkeit | Luftfeuchte | Feuchte | wie feucht):Luftfeuchtigkeit";
-    push @valueTypes, "(Batterie | Batteriestand | Batteriezustand | Ladestand | Ladezustand | Batteriestatus | Ladestatus):Batterie";
-    push @valueTypes, "(Wasserstand | wie viel Wasser | wieviel Wasser | wie viel Liter | wieviel Liter):Wasserstand";
+    push @valueTypes, "(wie hell):Helligkeit";
+    push @valueTypes, "Helligkeit";
+    push @valueTypes, "(Farbtemperatur | gemessene Temperatur | wie warm | wie heiß | wie kalt):Temperatur";
+    push @valueTypes, "Temperatur";
+    push @valueTypes, "(wie laut):Lautstärke";
+    push @valueTypes, "Lautstärke";
+    push @valueTypes, "(eingestellte Temperatur | gestellt | eingestellt):Sollwert";
+    push @valueTypes, "Sollwert";
+    push @valueTypes, "(Luftfeuchte | Feuchte | wie feucht):Luftfeuchtigkeit";
+    push @valueTypes, "Luftfeuchtigkeit";
+    push @valueTypes, "(Batteriestand | Batteriezustand | Ladestand | Ladezustand | Batteriestatus | Ladestatus):Batterie";
+    push @valueTypes, "Batterie";
+    push @valueTypes, "(wie viel Wasser | wieviel Wasser | wie viel Liter | wieviel Liter):Wasserstand";
+    push @valueTypes, "Wasserstand";
 
     return @valueTypes;
 }
@@ -450,8 +457,10 @@ sub allRhasspyValueTypes() {
 # Alle Änderungstypen sammeln
 sub allRhasspyChangeTypes() {
     my @changeTypes;
-    push @changeTypes, "(niedriger | kleiner | weiter zu | weiter runter | weiter schließen | verringern):niedriger";
-    push @changeTypes, "(höher | größer | weiter auf | weiter hoch | weiter öffnen | erhöhen | weiter rauf):höher";
+    push @changeTypes, "(kleiner | weiter zu | weiter runter | weiter schließen | verringern):niedriger";
+    push @changeTypes, "niedriger";
+    push @changeTypes, "(größer | weiter auf | weiter hoch | weiter öffnen | erhöhen | weiter rauf):höher";
+    push @changeTypes, "höher";
     push @changeTypes, "lauter";
     push @changeTypes, "leiser";
     push @changeTypes, "heller";
@@ -466,7 +475,8 @@ sub allRhasspyChangeTypes() {
 # Alle Timeraktionen sammeln
 sub allRhasspyTimerActions() {
     my @timerActions;
-    push @timerActions, "(abbrechen | stoppen | stoppe | stop | beenden | anhalten | breche | beende | halte):abbrechen";
+    push @timerActions, "(stoppen | stoppe | stop | beenden | anhalten | breche | beende | halte):abbrechen";
+    push @timerActions, "abbrechen";
 
     return @timerActions;
 }
@@ -475,11 +485,16 @@ sub allRhasspyTimerActions() {
 # Alle Kommandos sammeln
 sub allRhasspyCommands() {
     my @commands;
-    push @commands, "(pause | pausieren | anhalten):pause";
-    push @commands, "(play | weiterspielen | fortsetzen):play";
-    push @commands, "(stop | stoppe | stoppen | beenden):stop";
-    push @commands, "(vor | weiter | vorwärts | vorne | nächste | nächstes | nächster | nächsten | überspringen):vor";
-    push @commands, "(zurück | zurück | rückwärts | letzte | letztes | letzter | letzten | vorherige | vorheriges | vorheriger | vorherigen):zurück";
+    push @commands, "(pausieren | anhalten):pause";
+    push @commands, "pause";
+    push @commands, "(weiterspielen | fortsetzen):play";
+    push @commands, "play";
+    push @commands, "(stoppe | stoppen | beenden):stop";
+    push @commands, "stop";
+    push @commands, "(weiter | vorwärts | vorne | nächste | nächstes | nächster | nächsten | überspringen):vor";
+    push @commands, "vor";
+    push @commands, "(rückwärts | letzte | letztes | letzter | letzten | vorherige | vorheriges | vorheriger | vorherigen):zurück";
+    push @commands, "zurück";
 
     return @commands;
 }
@@ -487,8 +502,10 @@ sub allRhasspyCommands() {
 # Alle An Aus Werte sammeln
 sub allRhasspyOnOffValues() {
     my @onOffValues;
-    push @onOffValues, "(an | einschalten | ein | anschalten | aktiviere | anmachen | schließe | schließen | runter | zu | raus | ausfahren | rausfahren):an";
-    push @onOffValues, "(aus | ausschalten | ab | abschalten | deaktiviere | ausmachen | öffne | öffnen | rauf | auf | rauf | rein | einfahren | reinfahren):aus";
+    push @onOffValues, "(einschalten | ein | anschalten | aktiviere | anmachen | schließe | schließen | runter | zu | raus | ausfahren | rausfahren):an";
+    push @onOffValues, "an";
+    push @onOffValues, "(ausschalten | ab | abschalten | deaktiviere | ausmachen | öffne | öffnen | rauf | auf | rauf | rein | einfahren | reinfahren):aus";
+    push @onOffValues, "aus";
 
     return @onOffValues;
 }
@@ -497,14 +514,20 @@ sub allRhasspyOnOffValues() {
 # Alle Status sammeln
 sub allRhasspyStatus() {
     my @status;
-    push @status, "(an | ein | angeschaltet | eingeschaltet):an";
-    push @status, "(aus | ausgeschaltet):aus";
-    push @status, "(auf | offen):auf";
-    push @status, "(zu | geschlossen):zu";
-    push @status, "(eingefahren | reingefahren):eingefahren";
-    push @status, "(ausgefahren | rausgefahren):ausgefahren";
-    push @status, "(läuft):läuft";
-    push @status, "(fertig):fertig";
+    push @status, "(ein | angeschaltet | eingeschaltet):an";
+    push @status, "an";
+    push @status, "(ausgeschaltet):aus";
+    push @status, "aus";
+    push @status, "(offen):auf";
+    push @status, "auf";
+    push @status, "(geschlossen):zu";
+    push @status, "zu";
+    push @status, "(reingefahren):eingefahren";
+    push @status, "eingefahren";
+    push @status, "(rausgefahren):ausgefahren";
+    push @status, "ausgefahren";
+    push @status, "läuft";
+    push @status, "fertig";
 
     return @status;
 }
@@ -997,11 +1020,11 @@ sub onmessage($$$) {
             RHASSPY::handleIntentSetNumeric($hash, $data);
         } elsif ($intent eq 'GetNumeric') {
             RHASSPY::handleIntentGetNumeric($hash, $data);
-        } elsif ($intent eq 'Status') {
+        } elsif ($intent eq 'GetStatus') {
             RHASSPY::handleIntentStatus($hash, $data);
-        } elsif ($intent eq 'MediaControls') {
+        } elsif ($intent eq 'SetMediaControl') {
             RHASSPY::handleIntentMediaControls($hash, $data);
-        } elsif ($intent eq 'MediaChannels') {
+        } elsif ($intent eq 'SetMediaChannel') {
             RHASSPY::handleIntentMediaChannels($hash, $data);
         } elsif ($intent eq 'SetColor') {
               RHASSPY::handleIntentSetColor($hash, $data);
