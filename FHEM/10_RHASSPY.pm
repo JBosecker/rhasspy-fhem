@@ -28,6 +28,7 @@ my %sets = (
 # MQTT Topics die das Modul automatisch abonniert
 my @topics = qw(
     hermes/intent/+
+    hermes/nlu/intentNotRecognized
     hermes/hotword/toggleOff
     hermes/hotword/toggleOn
 );
@@ -46,7 +47,7 @@ sub RHASSPY_Initialize($) {
     $hash->{UndefFn} = "RHASSPY::Undefine";
     $hash->{SetFn} = "RHASSPY::Set";
     $hash->{AttrFn} = "RHASSPY::Attr";
-    $hash->{AttrList} = "defaultRoom rhasspyIntents:textField-long shortcuts:textField-long response:textField-long " . $main::readingFnAttributes;
+    $hash->{AttrList} = "disable:0,1 defaultRoom rhasspyIntents:textField-long shortcuts:textField-long response:textField-long " . $main::readingFnAttributes;
     $hash->{ReadFn}   = "RHASSPY::ioDevRead";
     $hash->{ReadyFn}  = "RHASSPY::ioDevReady";
 }
@@ -118,6 +119,9 @@ BEGIN {
         DevIo_SimpleWrite
         HttpUtils_NonblockingGet
         trim
+        InternalTimer
+        RemoveInternalTimer
+        urlEncode
     ))
 };
 
@@ -169,20 +173,18 @@ sub Set($$$@) {
     my ($hash, $name, $command, @values) = @_;
     return "Unknown argument $command, choose one of " . join(" ", sort keys %sets) if(!defined($sets{$command}));
 
-    Log3($hash->{NAME}, 5, "set " . $command . " - value: " . join (" ", @values));
+    my $text = decode_utf8(join(" ", @values));
+    Log3($hash->{NAME}, 5, "set " . $command . " - value: " . $text);
 
     # Say Cmd
     if ($command eq "say") {
-        my $text = join (" ", @values);
         RHASSPY::say($hash, $text);
     }
     elsif ($command eq "play") {
-        my $text = join (" ", @values);
-        SNIPS::playBytes($hash, $text);
+        RHASSPY::playBytes($hash, $text);
     }
     # TextCommand Cmd
     elsif ($command eq "textCommand") {
-        my $text = join (" ", @values);
         RHASSPY::textCommand($hash, $text);
     }
     # Update Model Cmd
@@ -191,8 +193,7 @@ sub Set($$$@) {
     }
     # Volume Cmd
     elsif ($command eq "volume") {
-        my $params = join (" ", @values);
-        RHASSPY::setVolume($hash, $params);
+        RHASSPY::setVolume($hash, $text);
     }
     # Reconnect
     elsif ($command eq "reconnect") {
@@ -207,9 +208,8 @@ sub Attr($$$$) {
     my $hash = $defs{$name};
 
     # IODev Attribut gesetzt
-    if ($attribute eq "IODev") {
-
-        return undef;
+    if ($attribute eq "disable") {
+        RHASSPY::ioDevReconnect($hash);
     }
 
     return undef;
@@ -353,8 +353,7 @@ sub allRhasspyColors() {
 sub allRhasspyShortcuts($) {
     my ($hash) = @_;
     my @shortcuts, my @sorted;
-
-    my @rows = split(/\n/, decode_utf8(AttrVal($hash->{NAME},"shortcuts",undef)));
+    my @rows = split(/\n/, decode_utf8(AttrVal($hash->{NAME}, "shortcuts", "")));
     foreach (@rows) {
         my @tokens = split('=', $_);
         my $shortcut = shift(@tokens);
@@ -469,16 +468,6 @@ sub allRhasspyChangeTypes() {
     push @changeTypes, "kälter";
 
     return @changeTypes;
-}
-
-
-# Alle Timeraktionen sammeln
-sub allRhasspyTimerActions() {
-    my @timerActions;
-    push @timerActions, "(stoppen | stoppe | stop | beenden | anhalten | breche | beende | halte):abbrechen";
-    push @timerActions, "abbrechen";
-
-    return @timerActions;
 }
 
 
@@ -888,6 +877,19 @@ sub getOnOffState ($$$) {
 }
 
 
+# Umlaute durch "normale" Buchstaben austauschen
+sub replaceUmlauts {
+  my ($string) = @_;
+
+  my %umlauts = ("ä" => "ae", "Ä" => "Ae", "ü" => "ue", "Ü" => "Ue", "ö" => "oe", "Ö" => "Oe", "ß" => "ss" );
+  my $keys = join("|", keys(%umlauts));
+
+  my $fixedString = decode_utf8($string);
+  $fixedString =~ s/($keys)/$umlauts{$1}/g;
+  return encode_utf8($fixedString);
+}
+
+
 # JSON parsen
 sub parseJSON($$) {
     my ($hash, $json) = @_;
@@ -901,7 +903,10 @@ sub parseJSON($$) {
     }
 
     # Standard-Keys auslesen
-    ($data->{'intent'} = $decoded->{'intent'}{'intentName'}) =~ s/^.*.://;
+    if (exists($decoded->{'intent'})) {
+        ($data->{'intent'} = $decoded->{'intent'}{'intentName'}) =~ s/^.*.://;
+    }
+
     $data->{'probability'} = $decoded->{'intent'}{'confidenceScore'};
     $data->{'sessionId'} = $decoded->{'sessionId'};
     $data->{'siteId'} = $decoded->{'siteId'};
@@ -946,9 +951,10 @@ sub parseJSON($$) {
         my $value = $data->{$_};
         my $decodedKey = decode_utf8($_);
         my $decodedValue = decode_utf8($value);
+        my $logValue = defined($decodedValue) ? $decodedValue : "";
 
         $result->{$decodedKey} = $decodedValue;
-        Log3($hash->{NAME}, 5, "Parsed value: $decodedValue (hex: " . unpack('H*', $decodedValue) . ") for key: $decodedKey");
+        Log3($hash->{NAME}, 5, "Parsed value: $logValue (hex: " . unpack('H*', $logValue) . ") for key: $decodedKey");
     }
 
     return $result;
@@ -965,15 +971,14 @@ sub onmessage($$$) {
         my $room = roomName($hash, $data);
 
         if (defined($room)) {
-            #my %umlauts = ("ä" => "ae", "Ä" => "Ae", "ü" => "ue", "Ü" => "Ue", "ö" => "oe", "Ö" => "Oe", "ß" => "ss" );
-            #my $keys = join ("|", keys(%umlauts));
-
-            #$room =~ s/($keys)/$umlauts{$1}/g;
+            # We need to delay the resetting of the listening readings because of multiple calls
+            # Otherwise it would be 1 ---- 0 - 1 ---- 0 - 1 ---- 0 in a short period of time
+            RHASSPY::removeIdentifiableInternalTimer($room, $hash, "RHASSPY::setListeningOff");
 
             if ($topic =~ m/toggleOff/) {
-                readingsSingleUpdate($hash, "listening_" . lc(encode_utf8($room)), 1, 1);
+                RHASSPY::setListeningOn($hash, $room);
             } elsif ($topic =~ m/toggleOn/) {
-                readingsSingleUpdate($hash, "listening_" . lc(encode_utf8($room)), 0, 1);
+                RHASSPY::identifiableInternalTimer($room, gettimeofday() + 2, "RHASSPY::setListeningOff", $hash, 0)
             }
         }
     }
@@ -1031,6 +1036,35 @@ sub onmessage($$$) {
         } else {
             RHASSPY::handleCustomIntent($hash, $intent, $data);
         }
+    }
+    # Intent Erkennung ist fehlgeschlagen -> Protokollieren
+    elsif ($topic =~ qr/^hermes\/nlu\/intentNotRecognized/) {
+        Log3($hash->{NAME}, 3, $hash->{NAME} . " - Not recognized intent: " . $message);
+    }
+}
+
+
+# Listening Status setzen
+sub setListeningOn {
+    my ($hash, $room) = @_;
+    my $readingsName = "listening_" . lc(RHASSPY::replaceUmlauts(encode_utf8($room)));
+
+    if (ReadingsVal($hash->{NAME}, $readingsName, 0) != 1) {
+        readingsSingleUpdate($hash, $readingsName, 1, 1);
+    }
+}
+
+
+# Listening Status setzen
+sub setListeningOff {
+    my ($timerHash) = @_;
+    my $hash = $timerHash->{HASH};
+    my $room = $timerHash->{IDENTIFIER};
+
+    my $readingsName = "listening_" . lc(RHASSPY::replaceUmlauts(encode_utf8($room)));
+
+    if (ReadingsVal($hash->{NAME}, $readingsName, 1) != 0) {
+        readingsSingleUpdate($hash, $readingsName, 0, 1);
     }
 }
 
@@ -1131,7 +1165,8 @@ sub playBytes($$){
 
     # TODO: Check if that works
     #MQTT::send_publish($hash->{IODev}, topic => 'hermes/audioServer/'.$siteId.'/playBytes/0', message => $_, qos => 0, retain => "0");
-    RHASSPY::mqttPublish($hash, 'hermes/audioServer/'.$siteId.'/playBytes/0', $_);
+    #RHASSPY::mqttPublish($hash, 'hermes/audioServer/'.$siteId.'/playBytes/0', encode_base64($_));
+    RHASSPY::postWavData($hash, $_, $siteId);
 }
 
 
@@ -1167,7 +1202,6 @@ sub updateModel($) {
     my @units = allRhasspyUnits();
     my @valueTypes = allRhasspyValueTypes();
     my @changeTypes = allRhasspyChangeTypes();
-    my @timerActions = allRhasspyTimerActions();
     my @commands = allRhasspyCommands();
     my @onOffValues = allRhasspyOnOffValues;
     my @status = allRhasspyStatus();
@@ -1188,7 +1222,6 @@ sub updateModel($) {
     if (@units > 0) { $slots->{'fhem/unit'} = \@units; }
     if (@valueTypes > 0) { $slots->{'fhem/valuetype'} = \@valueTypes; }
     if (@changeTypes > 0) { $slots->{'fhem/changetype'} = \@changeTypes; }
-    if (@timerActions > 0) { $slots->{'fhem/timeraction'} = \@timerActions; }
     if (@commands > 0) { $slots->{'fhem/command'} = \@commands; }
     if (@onOffValues > 0) { $slots->{'fhem/onoffvalue'} = \@onOffValues; }
     if (@status > 0) { $slots->{'fhem/status'} = \@status; }
@@ -1344,6 +1377,35 @@ sub postTrain {
 }
 
 
+# WAV Daten an Rhasspy senden
+sub postWavData {
+    my ($hash,  $data, $siteId) = @_;
+    my $host = $hash->{HOST};
+    my $port = $hash->{PORT};
+    my $url = "http://$host:$port/api/play-wav?siteId=" . urlEncode(encode_utf8($siteId));
+
+    my $params = {
+        url        => $url,
+        method     => "POST",
+        timeout    => 10,
+        noshutdown => 1,
+        data       => $data,
+        hash       => $hash,
+        header     => "Content-Type: audio/wav"
+    };
+
+    $params->{callback} = sub($$$) {
+        my ($param, $err, $data) = @_;
+
+        if ($err ne "") {
+            Log3($hash->{NAME}, 1, "Post wav data error: $err");
+        }
+    };
+
+    HttpUtils_NonblockingGet($params);
+}
+
+
 # Eingehender Custom-Intent
 sub handleCustomIntent($$$) {
     my ($hash, $intentName, $data) = @_;
@@ -1373,8 +1435,8 @@ sub handleCustomIntent($$$) {
     # Custom Intent Definition Parsen
     if ($intent =~ qr/^$intentName=.*\(.*\)/) {
         my @tokens = split(/=|\(|\)/, $intent);
-        my $subName =  "main::" . $tokens[1] if (@tokens > 0);
-        my @paramNames = split(/,/, $tokens[2]) if (@tokens > 1);
+        my $subName =  "main::" . $tokens[1] if (@tokens > 0 && defined($tokens[1]));
+        my @paramNames = split(/,/, $tokens[2]) if (@tokens > 1 && defined($tokens[2]));
 
         if (defined($subName)) {
             my @params = map { $data->{$_} } @paramNames;
@@ -1831,6 +1893,43 @@ sub unicodeDecode {
     return $string;
 }
 
+
+#######################################
+#       Timer Functions
+#######################################
+
+sub identifiableInternalTimer {
+   my ($identifier, $tim, $callback, $hash, $waitIfInitNotDone) = @_;
+
+   my $mHash;
+   if ($identifier eq "") {
+      $mHash = $hash;
+   } else {
+      my $timerName = "$hash->{NAME}_$identifier";
+      if (exists  ($hash->{TIMER}{$timerName})) {
+          $mHash = $hash->{TIMER}{$timerName};
+      } else {
+          $mHash = { HASH=>$hash, NAME=>$timerName, IDENTIFIER=>$identifier};
+          $hash->{TIMER}{$timerName} = $mHash;
+      }
+   }
+   InternalTimer($tim, $callback, $mHash, $waitIfInitNotDone);
+}
+################################################################################
+sub removeIdentifiableInternalTimer {
+   my ($identifier, $hash, $function) = @_;
+
+   my $timerName = "$hash->{NAME}_$identifier";
+   if ($identifier eq "") {
+      RemoveInternalTimer($hash, $function);
+   } else {
+      my $myHash = $hash->{TIMER}{$timerName};
+      if (defined($myHash)) {
+         delete $hash->{TIMER}{$timerName};
+         RemoveInternalTimer($myHash, $function);
+      }
+   }
+}
 #######################################
 #       Websocket Functions
 #######################################
@@ -1840,12 +1939,24 @@ sub ioDevReconnect {
 
     # IoDev schließen und anschließend öffnen
     DevIo_CloseDev($hash);
-    return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened");
+
+    if (AttrVal($hash->{NAME}, "disable", 0) == 0) {
+        return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened");
+    }
+    else {
+        return undef
+    }
 }
 
 sub ioDevReady {
     my ($hash) = @_;
-    return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened") if ( $hash->{STATE} eq "disconnected" );
+
+    if (AttrVal($hash->{NAME}, "disable", 0) == 0 && $hash->{STATE} eq "disconnected") {
+        return DevIo_OpenDev($hash, 1, "RHASSPY::ioDevOpened");
+    }
+    else {
+        return undef
+    }
 }
 
 sub ioDevOpened {
@@ -2029,8 +2140,8 @@ sub websocketEncode {
     $wsString .= pack 'C', ($websocketOpcode{$type} | $RSV | ($FIN ? 128 : 0));
     my $len = length($payload);
 
-    Log3($name, 3, "websocketEncode - Payload: " . $payload);
-    return "payload to big" if ($len > $MAX_PAYLOAD_SIZE);
+    Log3($name, 4, "websocketEncode - Payload: " . $payload);
+    #return "payload too big" if ($len > $MAX_PAYLOAD_SIZE);
 
     if ($len <= 125) {
         $len |= 0x80 if $masked;
@@ -2051,7 +2162,7 @@ sub websocketEncode {
         $wsString .= $payload;
     }
 
-    Log3($name, 3, "websocketEncode - String: " . unpack('H*', $wsString));
+    Log3($name, 5, "websocketEncode - String: " . unpack('H*', $wsString));
     RHASSPY::ioDevWrite($hash, $wsString);
 }
 
