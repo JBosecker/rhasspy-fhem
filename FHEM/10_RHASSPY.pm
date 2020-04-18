@@ -379,7 +379,7 @@ sub allRhasspySentences() {
         <$fh>;
     };
 
-    return decode_utf8($document);
+    return $document;
 }
 
 
@@ -389,6 +389,7 @@ sub allRhasspyArticles() {
     push @articles, "der";
     push @articles, "die";
     push @articles, "das";
+    push @articles, "den";
 
     return @articles;
 }
@@ -419,106 +420,6 @@ sub allRhasspyDevicePrepositions() {
     push @prepositions, "im";
 
     return @prepositions;
-}
-
-
-# Alle Einheiten sammeln
-sub allRhasspyUnits() {
-    my @units;
-    push @units, "Prozent";
-
-    return @units;
-}
-
-
-# Alle Wertetypen sammeln
-sub allRhasspyValueTypes() {
-    my @valueTypes;
-    push @valueTypes, "(wie hell):Helligkeit";
-    push @valueTypes, "Helligkeit";
-    push @valueTypes, "(Farbtemperatur | gemessene Temperatur | wie warm | wie heiß | wie kalt):Temperatur";
-    push @valueTypes, "Temperatur";
-    push @valueTypes, "(wie laut):Lautstärke";
-    push @valueTypes, "Lautstärke";
-    push @valueTypes, "(eingestellte Temperatur | gestellt | eingestellt):Sollwert";
-    push @valueTypes, "Sollwert";
-    push @valueTypes, "(Luftfeuchte | Feuchte | wie feucht):Luftfeuchtigkeit";
-    push @valueTypes, "Luftfeuchtigkeit";
-    push @valueTypes, "(Batteriestand | Batteriezustand | Ladestand | Ladezustand | Batteriestatus | Ladestatus):Batterie";
-    push @valueTypes, "Batterie";
-    push @valueTypes, "(wie viel Wasser | wieviel Wasser | wie viel Liter | wieviel Liter):Wasserstand";
-    push @valueTypes, "Wasserstand";
-
-    return @valueTypes;
-}
-
-
-# Alle Änderungstypen sammeln
-sub allRhasspyChangeTypes() {
-    my @changeTypes;
-    push @changeTypes, "(kleiner | weiter zu | weiter runter | weiter schließen | verringern):niedriger";
-    push @changeTypes, "niedriger";
-    push @changeTypes, "(größer | weiter auf | weiter hoch | weiter öffnen | erhöhen | weiter rauf):höher";
-    push @changeTypes, "höher";
-    push @changeTypes, "lauter";
-    push @changeTypes, "leiser";
-    push @changeTypes, "heller";
-    push @changeTypes, "dunkler";
-    push @changeTypes, "wärmer";
-    push @changeTypes, "kälter";
-
-    return @changeTypes;
-}
-
-
-# Alle Kommandos sammeln
-sub allRhasspyCommands() {
-    my @commands;
-    push @commands, "(pausieren | anhalten):pause";
-    push @commands, "pause";
-    push @commands, "(weiterspielen | fortsetzen):play";
-    push @commands, "play";
-    push @commands, "(stoppe | stoppen | beenden):stop";
-    push @commands, "stop";
-    push @commands, "(weiter | vorwärts | vorne | nächste | nächstes | nächster | nächsten | überspringen):vor";
-    push @commands, "vor";
-    push @commands, "(rückwärts | letzte | letztes | letzter | letzten | vorherige | vorheriges | vorheriger | vorherigen):zurück";
-    push @commands, "zurück";
-
-    return @commands;
-}
-
-# Alle An Aus Werte sammeln
-sub allRhasspyOnOffValues() {
-    my @onOffValues;
-    push @onOffValues, "(einschalten | ein | anschalten | aktiviere | anmachen | schließe | schließen | runter | zu | raus | ausfahren | rausfahren):an";
-    push @onOffValues, "an";
-    push @onOffValues, "(ausschalten | ab | abschalten | deaktiviere | ausmachen | öffne | öffnen | rauf | auf | rauf | rein | einfahren | reinfahren):aus";
-    push @onOffValues, "aus";
-
-    return @onOffValues;
-}
-
-
-# Alle Status sammeln
-sub allRhasspyStatus() {
-    my @status;
-    push @status, "(ein | angeschaltet | eingeschaltet):an";
-    push @status, "an";
-    push @status, "(ausgeschaltet):aus";
-    push @status, "aus";
-    push @status, "(offen):auf";
-    push @status, "auf";
-    push @status, "(geschlossen):zu";
-    push @status, "zu";
-    push @status, "(reingefahren):eingefahren";
-    push @status, "eingefahren";
-    push @status, "(rausgefahren):ausgefahren";
-    push @status, "ausgefahren";
-    push @status, "läuft";
-    push @status, "fertig";
-
-    return @status;
 }
 
 
@@ -1101,8 +1002,16 @@ sub getResponse($$) {
         DefaultConfirmation => "Ok."
     );
 
-    $response = getCmd($hash, $hash->{NAME}, "response", $identifier);
-    $response = $messages{$identifier} if (!defined($response));
+    my $responsesString = getCmd($hash, $hash->{NAME}, "response", $identifier);
+
+    if (defined($responsesString)) {
+        my @responses = split(/\|/, $responsesString);
+        my $index = rand(int(scalar(@responses) - 1));
+        $response = $responses[$index];
+    }
+    else {
+        $response = $messages{$identifier};
+    }
 
     return $response;
 }
@@ -1163,9 +1072,6 @@ sub playBytes($$){
     # Read the binary data
     $_ = do { local $/; <$ifile> };
 
-    # TODO: Check if that works
-    #MQTT::send_publish($hash->{IODev}, topic => 'hermes/audioServer/'.$siteId.'/playBytes/0', message => $_, qos => 0, retain => "0");
-    #RHASSPY::mqttPublish($hash, 'hermes/audioServer/'.$siteId.'/playBytes/0', encode_base64($_));
     RHASSPY::postWavData($hash, $_, $siteId);
 }
 
@@ -1199,12 +1105,6 @@ sub updateModel($) {
     my @articles = allRhasspyArticles();
     my @roomPrepositions = allRhasspyRoomPrepositions();
     my @devicePrepositions = allRhasspyDevicePrepositions();
-    my @units = allRhasspyUnits();
-    my @valueTypes = allRhasspyValueTypes();
-    my @changeTypes = allRhasspyChangeTypes();
-    my @commands = allRhasspyCommands();
-    my @onOffValues = allRhasspyOnOffValues;
-    my @status = allRhasspyStatus();
     my @devices = allRhasspyNames();
     my @rooms = allRhasspyRooms();
     my @channels = allRhasspyChannels();
@@ -1219,12 +1119,6 @@ sub updateModel($) {
     if (@articles > 0) { $slots->{'fhem/article'} = \@articles; }
     if (@roomPrepositions > 0) { $slots->{'fhem/roompreposition'} = \@roomPrepositions; }
     if (@devicePrepositions > 0) { $slots->{'fhem/devicepreposition'} = \@devicePrepositions; }
-    if (@units > 0) { $slots->{'fhem/unit'} = \@units; }
-    if (@valueTypes > 0) { $slots->{'fhem/valuetype'} = \@valueTypes; }
-    if (@changeTypes > 0) { $slots->{'fhem/changetype'} = \@changeTypes; }
-    if (@commands > 0) { $slots->{'fhem/command'} = \@commands; }
-    if (@onOffValues > 0) { $slots->{'fhem/onoffvalue'} = \@onOffValues; }
-    if (@status > 0) { $slots->{'fhem/status'} = \@status; }
     if (@devices > 0) { $slots->{'fhem/device'} = \@devices; }
     if (@rooms > 0) { $slots->{'fhem/room'} = \@rooms; }
     if (@channels > 0) { $slots->{'fhem/channel'} = \@channels; }
@@ -1233,7 +1127,7 @@ sub updateModel($) {
 
     # Search for not available slots in sentences and remove these
     my $sentences = allRhasspySentences();
-    my @sentenceLines = split /\n/, $sentences;
+    my @sentenceLines = split(/\n/, $sentences);
 
     for (my $i = $#sentenceLines; $i > -1; $i--) {
         my $sentence = $sentenceLines[$i];
@@ -1312,13 +1206,15 @@ sub postSentences {
     my $port = $hash->{PORT};
     my $url = "http://$host:$port/api/sentences";
 
+    Log3($hash->{NAME}, 5, "postSentences - sentences hex: " . unpack("H*", $sentences));
+
     my $data = {
         'intents/fhem_sentences.ini' => $sentences
     };
     my $json = encode_json($data);
 
-    Log3($hash->{NAME}, 5, "postSentences - $json");
-    Log3($hash->{NAME}, 5, "postSentences - hex: " . unpack("H*", $json));
+    Log3($hash->{NAME}, 5, "postSentences - json: $json");
+    Log3($hash->{NAME}, 5, "postSentences - json hex: " . unpack("H*", $json));
 
     my $params = {
         url        => $url,
