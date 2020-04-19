@@ -1006,7 +1006,7 @@ sub getResponse($$) {
 
     if (defined($responsesString)) {
         my @responses = split(/\|/, $responsesString);
-        my $index = rand(int(scalar(@responses) - 1));
+        my $index = rand(@responses);
         $response = $responses[$index];
     }
     else {
