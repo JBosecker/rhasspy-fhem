@@ -932,6 +932,8 @@ sub onmessage($$$) {
             RHASSPY::handleIntentMediaControls($hash, $data);
         } elsif ($intent eq 'SetMediaChannel') {
             RHASSPY::handleIntentMediaChannels($hash, $data);
+        } elsif ($intent eq 'GetMediaInfo') {
+            RHASSPY::handleIntentMediaInfo($hash, $data);
         } elsif ($intent eq 'SetColor') {
               RHASSPY::handleIntentSetColor($hash, $data);
         } else {
@@ -1711,6 +1713,58 @@ sub handleIntentMediaChannels($$) {
             runCmd($hash, $device, $cmd);
         }
     }
+    # Antwort senden
+    respond ($hash, $data->{'requestType'}, $data->{sessionId}, $response);
+}
+
+
+# Eingehende "GetMediaInfo" Intents bearbeiten
+sub handleIntentMediaInfo($$) {
+    my ($hash, $data) = @_;
+    my $questionType, my $device, my $room;
+    my $mapping;
+    my $response = getResponse($hash, "DefaultError");
+
+    Log3($hash->{NAME}, 5, "handleIntentMediaInfo called");
+
+    # Mindestens die Art der Frage muss übergeben worden sein
+    if (exists($data->{'QuestionType'})) {
+        $room = roomName($hash, $data);
+        $questionType = $data->{'QuestionType'};
+
+        # Passendes Gerät suchen
+        if (exists($data->{'Device'})) {
+            $device = getDeviceByName($hash, $room, $data->{'Device'});
+        } else {
+            $device = getActiveDeviceForIntentAndType($hash, $room, "GetMediaInfo", undef);
+        }
+
+        $response = getResponse($hash, "NoActiveMediaDevice");
+
+        if (defined($device)) {
+            $response = "Das weiß ich leider nicht.";
+            $mapping = getMapping($hash, $device, "GetMediaInfo", undef);
+
+            if (defined($mapping)) {
+                my $mappingKey;
+                if ($questionType eq "zusammenfassung") {
+                    $mappingKey = 'summary';
+                }
+                elsif ($questionType eq "dauer") {
+                    $mappingKey = 'duration';
+                }
+
+                if (defined($mappingKey) && exists($mapping->{$mappingKey})) {
+                    my $value = getValue($hash, $device, $mapping->{$mappingKey});
+
+                    if (defined($value)) {
+                        $response = $value;
+                    }
+                }
+            }
+        }
+    }
+
     # Antwort senden
     respond ($hash, $data->{'requestType'}, $data->{sessionId}, $response);
 }
