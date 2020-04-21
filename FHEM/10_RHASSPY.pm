@@ -975,15 +975,43 @@ sub setListeningOff {
 # Antwort ausgeben
 sub respond($$$$) {
     my ($hash, $type, $sessionId, $response) = @_;
-    my $json;
+    my $text, my $continueSession, my $intentFilter;
+
+    my $decoded = eval { decode_json($response) };
+
+    if ($@) {
+        # Not a JSON, so just return the string
+        $text = $response;
+    }
+    else {
+        # It's JSON, so return the decoded object
+        $text = $decoded->{'text'};
+        $continueSession = $decoded->{'continueSession'};
+        $intentFilter = $decoded->{'intentFilter'};
+    }
 
     if ($type eq "voice") {
         my $sendData =  {
             sessionId => $sessionId,
-            text => $response
+            text => $text
         };
 
-        RHASSPY::mqttPublish($hash, 'hermes/dialogueManager/endSession', $sendData);
+        if (defined($intentFilter)) {
+            $sendData->{'intent_filter'} = $intentFilter;
+        }
+
+        my $topic;
+
+        if ($continueSession) {
+            $topic = 'hermes/dialogueManager/continueSession';
+        }
+        else {
+            $topic = 'hermes/dialogueManager/endSession';
+        }
+
+        Log3($hash->{NAME}, 5, "respond - Topic: $topic");
+
+        RHASSPY::mqttPublish($hash, $topic, $sendData);
         readingsSingleUpdate($hash, "voiceResponse", encode_utf8($response), 1);
     }
     elsif ($type eq "text") {
